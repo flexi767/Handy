@@ -81,6 +81,8 @@ const RecordingOverlay: React.FC = () => {
         setState(overlayState);
         if (overlayState === "recording" || overlayState === "streaming") {
           setStreamText({ committed: "", tentative: "" });
+          smoothedLevelsRef.current = Array(16).fill(0);
+          setLevels(Array(WAVE_BARS).fill(0));
         }
         if (overlayState === "streaming") {
           setPhase("listening");
@@ -163,8 +165,9 @@ const RecordingOverlay: React.FC = () => {
     `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 
   // ---- Shared building blocks (one visual language for every overlay form) ----
+  const waveformHasAudio = levels.some((level) => level > 0.012);
   const waveform = (
-    <div className="swave">
+    <div className={`swave ${waveformHasAudio ? "" : "idle"}`}>
       {levels.map((v, i) => (
         <i
           key={i}
