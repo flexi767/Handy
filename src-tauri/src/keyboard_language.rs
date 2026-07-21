@@ -8,6 +8,35 @@ pub const ENGLISH_LANGUAGE: &str = "en-US";
 pub const GERMAN_LANGUAGE: &str = "de-DE";
 pub const BULGARIAN_LANGUAGE: &str = "bg-BG";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct KeyboardInputSource {
+    description: String,
+    languages: Vec<String>,
+    fallback_language: Option<String>,
+}
+
+#[cfg(test)]
+impl KeyboardInputSource {
+    fn test(description: &str, languages: &[&str]) -> Self {
+        Self {
+            description: description.to_string(),
+            languages: languages
+                .iter()
+                .map(|language| language.to_string())
+                .collect(),
+            fallback_language: None,
+        }
+    }
+
+    fn test_with_fallback(description: &str, fallback_language: &str) -> Self {
+        Self {
+            description: description.to_string(),
+            languages: Vec::new(),
+            fallback_language: Some(fallback_language.to_string()),
+        }
+    }
+}
+
 pub fn is_allowed_persisted_language(language: &str) -> bool {
     matches!(
         language,
@@ -34,7 +63,7 @@ pub fn language_for_recording(persisted_language: &str) -> String {
     }
 
     match current_keyboard_input_source()
-        .as_deref()
+        .as_ref()
         .and_then(language_for_input_source)
     {
         Some(language) => {
@@ -46,8 +75,8 @@ pub fn language_for_recording(persisted_language: &str) -> String {
         }
         None => {
             warn!(
-                "Current keyboard layout is not ABC, German, or Bulgarian Phonetic; \
-                 using English for this recording"
+                "Current keyboard input source does not map to a supported language; \
+                 using the configured English fallback for this recording"
             );
             ENGLISH_LANGUAGE.to_string()
         }
@@ -64,12 +93,12 @@ pub fn language_candidates_for_recording(persisted_language: &str) -> Vec<String
     }
 
     let enabled_sources = enabled_keyboard_input_sources();
-    language_candidates_from_sources(current_keyboard_input_source().as_deref(), &enabled_sources)
+    language_candidates_from_sources(current_keyboard_input_source().as_ref(), &enabled_sources)
 }
 
 fn language_candidates_from_sources(
-    active_source: Option<&str>,
-    enabled_sources: &[String],
+    active_source: Option<&KeyboardInputSource>,
+    enabled_sources: &[KeyboardInputSource],
 ) -> Vec<String> {
     let primary = active_source
         .and_then(language_for_input_source)
@@ -78,24 +107,29 @@ fn language_candidates_from_sources(
                 .iter()
                 .find_map(|source| language_for_input_source(source))
         })
-        .unwrap_or(ENGLISH_LANGUAGE);
+        .unwrap_or_else(|| ENGLISH_LANGUAGE.to_string());
 
-    ordered_language_candidates(primary, enabled_sources.iter())
+    ordered_language_candidates(&primary, enabled_sources.iter())
 }
 
 fn ordered_language_candidates<'a>(
     primary: &str,
-    input_sources: impl IntoIterator<Item = &'a String>,
+    input_sources: impl IntoIterator<Item = &'a KeyboardInputSource>,
 ) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut languages = Vec::with_capacity(3);
-    let mut add = |language: &str| {
-        if seen.insert(language.to_string()) {
-            languages.push(language.to_string());
+    let mut add = |language: String| {
+        let base = language
+            .split('-')
+            .next()
+            .unwrap_or(&language)
+            .to_ascii_lowercase();
+        if seen.insert(base) {
+            languages.push(language);
         }
     };
 
-    add(primary);
+    add(primary.to_string());
     for source in input_sources {
         if let Some(language) = language_for_input_source(source) {
             add(language);
@@ -104,32 +138,47 @@ fn ordered_language_candidates<'a>(
     languages
 }
 
-fn language_for_input_source(source: &str) -> Option<&'static str> {
-    let normalized = source.to_ascii_lowercase();
-    let has_source = |name: &str| {
-        normalized
-            .split_whitespace()
-            .any(|part| part == name || part.ends_with(&format!(".{name}")))
-    };
-    let compact: String = normalized
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .collect();
-
-    if has_source("abc") {
-        Some(ENGLISH_LANGUAGE)
-    } else if has_source("german") {
-        Some(GERMAN_LANGUAGE)
-    } else if compact.contains("bulgarian") && compact.contains("phonetic") {
-        Some(BULGARIAN_LANGUAGE)
-    } else {
-        None
+fn language_for_input_source(source: &KeyboardInputSource) -> Option<String> {
+    match source.languages.first().map(|language| language.trim()) {
+        Some(language) if !language.is_empty() => canonicalize_bcp47(language),
+        _ => source
+            .fallback_language
+            .as_deref()
+            .and_then(canonicalize_bcp47),
     }
+}
+
+fn canonicalize_bcp47(language: &str) -> Option<String> {
+    let normalized = language.trim().replace('_', "-");
+    let mut subtags = normalized.split('-');
+    let primary = subtags.next()?;
+    if !(2..=8).contains(&primary.len())
+        || !primary
+            .chars()
+            .all(|character| character.is_ascii_alphabetic())
+    {
+        return None;
+    }
+
+    let mut canonical = primary.to_ascii_lowercase();
+    for subtag in subtags {
+        if !(1..=8).contains(&subtag.len())
+            || !subtag
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+        {
+            return None;
+        }
+        canonical.push('-');
+        canonical.push_str(subtag);
+    }
+    Some(canonical)
 }
 
 #[cfg(target_os = "macos")]
 mod macos_input_sources {
-    use std::ffi::{c_char, c_void, CStr};
+    use super::KeyboardInputSource;
+    use std::ffi::{c_char, c_void, CStr, CString};
 
     type CFTypeRef = *const c_void;
     type CFStringRef = *const c_void;
@@ -152,6 +201,7 @@ mod macos_input_sources {
         ) -> CFTypeRef;
         static kTISPropertyInputSourceID: CFStringRef;
         static kTISPropertyLocalizedName: CFStringRef;
+        static kTISPropertyInputSourceLanguages: CFStringRef;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -167,10 +217,18 @@ mod macos_input_sources {
             buffer_size: isize,
             encoding: u32,
         ) -> bool;
+        fn CFStringCreateWithCString(
+            allocator: CFTypeRef,
+            value: *const c_char,
+            encoding: u32,
+        ) -> CFStringRef;
+        fn CFLocaleCreateCanonicalLanguageIdentifierFromString(
+            allocator: CFTypeRef,
+            locale_identifier: CFStringRef,
+        ) -> CFStringRef;
     }
 
-    unsafe fn string_property(source: TISInputSourceRef, property: CFStringRef) -> Option<String> {
-        let value = unsafe { TISGetInputSourceProperty(source, property) } as CFStringRef;
+    unsafe fn cf_string(value: CFStringRef) -> Option<String> {
         if value.is_null() {
             return None;
         }
@@ -197,29 +255,86 @@ mod macos_input_sources {
             .map(ToOwned::to_owned)
     }
 
-    unsafe fn source_description(source: TISInputSourceRef) -> Option<String> {
+    unsafe fn string_property(source: TISInputSourceRef, property: CFStringRef) -> Option<String> {
+        let value = unsafe { TISGetInputSourceProperty(source, property) } as CFStringRef;
+        unsafe { cf_string(value) }
+    }
+
+    unsafe fn string_property_from_rust(value: &str) -> Option<CFStringRef> {
+        let value = CString::new(value).ok()?;
+        let string = unsafe {
+            CFStringCreateWithCString(std::ptr::null(), value.as_ptr(), K_CF_STRING_ENCODING_UTF8)
+        };
+        (!string.is_null()).then_some(string)
+    }
+
+    unsafe fn string_array_property(
+        source: TISInputSourceRef,
+        property: CFStringRef,
+    ) -> Vec<String> {
+        let values = unsafe { TISGetInputSourceProperty(source, property) } as CFArrayRef;
+        if values.is_null() {
+            return Vec::new();
+        }
+
+        let count = unsafe { CFArrayGetCount(values) };
+        let mut strings = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+        for index in 0..count {
+            let value = unsafe { CFArrayGetValueAtIndex(values, index) } as CFStringRef;
+            if let Some(value) = unsafe { cf_string(value) } {
+                strings.push(value);
+            }
+        }
+        strings
+    }
+
+    unsafe fn source_info(source: TISInputSourceRef) -> Option<KeyboardInputSource> {
         let id = unsafe { string_property(source, kTISPropertyInputSourceID) };
         let name = unsafe { string_property(source, kTISPropertyLocalizedName) };
-        match (id, name) {
+        let description = match (&id, &name) {
             (Some(id), Some(name)) => Some(format!("{id} {name}")),
-            (Some(value), None) | (None, Some(value)) => Some(value),
+            (Some(value), None) | (None, Some(value)) => Some(value.clone()),
             (None, None) => None,
+        }
+        .unwrap_or_default();
+        let languages = unsafe { string_array_property(source, kTISPropertyInputSourceLanguages) };
+        let fallback_language = name.as_deref().and_then(|name| unsafe {
+            let name = string_property_from_rust(name)?;
+            let canonical =
+                CFLocaleCreateCanonicalLanguageIdentifierFromString(std::ptr::null(), name);
+            CFRelease(name);
+            if canonical.is_null() {
+                return None;
+            }
+            let result = cf_string(canonical);
+            CFRelease(canonical);
+            result
+        });
+
+        if description.is_empty() && languages.is_empty() {
+            None
+        } else {
+            Some(KeyboardInputSource {
+                description,
+                languages,
+                fallback_language,
+            })
         }
     }
 
-    pub(super) fn current() -> Option<String> {
+    pub(super) fn current() -> Option<KeyboardInputSource> {
         unsafe {
             let source = TISCopyCurrentKeyboardInputSource();
             if source.is_null() {
                 return None;
             }
-            let result = source_description(source);
+            let result = source_info(source);
             CFRelease(source);
             result
         }
     }
 
-    pub(super) fn enabled() -> Vec<String> {
+    pub(super) fn enabled() -> Vec<KeyboardInputSource> {
         unsafe {
             // Passing include_all_installed=false restricts the result to input
             // sources the user enabled in Keyboard settings.
@@ -229,38 +344,38 @@ mod macos_input_sources {
             }
 
             let count = CFArrayGetCount(sources);
-            let mut descriptions = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+            let mut input_sources = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
             for index in 0..count {
                 let source = CFArrayGetValueAtIndex(sources, index) as TISInputSourceRef;
                 if !source.is_null() {
-                    if let Some(description) = source_description(source) {
-                        descriptions.push(description);
+                    if let Some(input_source) = source_info(source) {
+                        input_sources.push(input_source);
                     }
                 }
             }
             CFRelease(sources);
-            descriptions
+            input_sources
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-fn current_keyboard_input_source() -> Option<String> {
+fn current_keyboard_input_source() -> Option<KeyboardInputSource> {
     macos_input_sources::current()
 }
 
 #[cfg(target_os = "macos")]
-fn enabled_keyboard_input_sources() -> Vec<String> {
+fn enabled_keyboard_input_sources() -> Vec<KeyboardInputSource> {
     macos_input_sources::enabled()
 }
 
 #[cfg(not(target_os = "macos"))]
-fn current_keyboard_input_source() -> Option<String> {
+fn current_keyboard_input_source() -> Option<KeyboardInputSource> {
     None
 }
 
 #[cfg(not(target_os = "macos"))]
-fn enabled_keyboard_input_sources() -> Vec<String> {
+fn enabled_keyboard_input_sources() -> Vec<KeyboardInputSource> {
     Vec::new()
 }
 
@@ -271,50 +386,80 @@ mod tests {
     #[test]
     fn maps_supported_macos_input_sources() {
         assert_eq!(
-            language_for_input_source("com.apple.keylayout.ABC"),
-            Some(ENGLISH_LANGUAGE)
+            language_for_input_source(&KeyboardInputSource::test(
+                "renamed third-party layout",
+                &["en-US"],
+            )),
+            Some(ENGLISH_LANGUAGE.to_string())
         );
         assert_eq!(
-            language_for_input_source("com.apple.keylayout.German"),
-            Some(GERMAN_LANGUAGE)
+            language_for_input_source(&KeyboardInputSource::test("anything", &["de"])),
+            Some("de".to_string())
         );
         assert_eq!(
-            language_for_input_source("Bulgarian – Phonetic"),
-            Some(BULGARIAN_LANGUAGE)
+            language_for_input_source(&KeyboardInputSource::test("anything", &["bg-BG"])),
+            Some(BULGARIAN_LANGUAGE.to_string())
         );
         assert_eq!(
-            language_for_input_source("com.apple.keylayout.Bulgarian-Phonetic"),
-            Some(BULGARIAN_LANGUAGE)
+            language_for_input_source(&KeyboardInputSource::test("anything", &["fr-FR"])),
+            Some("fr-FR".to_string())
         );
+        assert_eq!(canonicalize_bcp47("es_419"), Some("es-419".to_string()));
+        assert_eq!(canonicalize_bcp47("sr-Latn"), Some("sr-Latn".to_string()));
         assert_eq!(
-            language_for_input_source("com.apple.keylayout.ABC ABC"),
-            Some(ENGLISH_LANGUAGE)
+            canonicalize_bcp47("en-u-nu-latn"),
+            Some("en-u-nu-latn".to_string())
         );
     }
 
     #[test]
-    fn rejects_unrestricted_and_unrelated_languages() {
+    fn uses_generic_canonicalized_name_fallback_only_without_metadata() {
+        assert_eq!(
+            language_for_input_source(&KeyboardInputSource::test(
+                "com.apple.keylayout.German",
+                &["fr"],
+            )),
+            Some("fr".to_string())
+        );
+        assert_eq!(
+            language_for_input_source(&KeyboardInputSource::test_with_fallback(
+                "renamed third-party layout",
+                "uk-UA",
+            )),
+            Some("uk-UA".to_string())
+        );
+        assert_eq!(
+            language_for_input_source(&KeyboardInputSource::test("unrecognized layout", &[])),
+            None
+        );
+    }
+
+    #[test]
+    fn keeps_explicit_settings_strict_but_keyboard_metadata_general() {
         assert_eq!(
             normalize_persisted_language("auto"),
             FOLLOW_KEYBOARD_LANGUAGE
         );
         assert_eq!(normalize_persisted_language("fr"), FOLLOW_KEYBOARD_LANGUAGE);
-        assert_eq!(language_for_input_source("French"), None);
+        assert_eq!(
+            language_for_input_source(&KeyboardInputSource::test("French", &["fr"])),
+            Some("fr".to_string())
+        );
     }
 
     #[test]
     fn retry_candidates_follow_active_then_enabled_keyboards_only() {
         let sources = vec![
-            "com.apple.keylayout.German German".to_string(),
-            "French".to_string(),
-            "com.apple.keylayout.ABC ABC".to_string(),
-            "Bulgarian - Phonetic".to_string(),
-            "com.apple.keylayout.German German".to_string(),
+            KeyboardInputSource::test("renamed layout", &["de-DE"]),
+            KeyboardInputSource::test("French", &["fr"]),
+            KeyboardInputSource::test("another renamed layout", &["en"]),
+            KeyboardInputSource::test("third-party layout", &["bg"]),
+            KeyboardInputSource::test("duplicate German", &["de"]),
         ];
 
         assert_eq!(
             ordered_language_candidates(GERMAN_LANGUAGE, sources.iter()),
-            vec![GERMAN_LANGUAGE, ENGLISH_LANGUAGE, BULGARIAN_LANGUAGE]
+            vec![GERMAN_LANGUAGE, "fr", "en", "bg"]
         );
     }
 
@@ -327,23 +472,32 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_active_layout_uses_an_enabled_supported_keyboard() {
+    fn candidates_remain_general_until_the_model_intersection() {
         let sources = vec![
-            "French".to_string(),
-            "com.apple.keylayout.German German".to_string(),
-            "Bulgarian - Phonetic".to_string(),
+            KeyboardInputSource::test("French", &["fr"]),
+            KeyboardInputSource::test("renamed German", &["de"]),
+            KeyboardInputSource::test("renamed Bulgarian", &["bg"]),
         ];
 
         assert_eq!(
-            language_candidates_from_sources(Some("French"), &sources),
-            vec![GERMAN_LANGUAGE, BULGARIAN_LANGUAGE]
+            language_candidates_from_sources(
+                Some(&KeyboardInputSource::test("French", &["fr"])),
+                &sources,
+            ),
+            vec!["fr", "de", "bg"]
         );
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn reads_the_current_macos_input_source() {
-        assert!(current_keyboard_input_source().is_some());
-        assert!(!enabled_keyboard_input_sources().is_empty());
+        let current = current_keyboard_input_source().expect("current keyboard input source");
+        assert!(!current.languages.is_empty());
+
+        let enabled = enabled_keyboard_input_sources();
+        assert!(!enabled.is_empty());
+        assert!(enabled
+            .iter()
+            .any(|source| language_for_input_source(source).is_some()));
     }
 }

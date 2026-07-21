@@ -1229,33 +1229,34 @@ impl TranscriptionManager {
         // never receives "auto") and computed fresh here — it is never written
         // back to settings, so the intent survives switching models and back.
         let language_intent = self.recording_language_intent(&settings.selected_language);
-        let validated_language = effective_language_for_model(
-            &language_intent,
-            self.model_manager.as_ref(),
-            &active_model,
-        );
-        let fallback_languages =
-            if settings.selected_language == crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE {
-                self.recording_language_intents(&settings.selected_language)
-                    .into_iter()
-                    .skip(1)
-                    .map(|language| {
-                        effective_language_for_model(
-                            &language,
-                            self.model_manager.as_ref(),
-                            &active_model,
-                        )
-                    })
-                    .filter(|language| language != "auto" && language != &validated_language)
-                    .fold(Vec::new(), |mut languages, language| {
-                        if !languages.contains(&language) {
-                            languages.push(language);
-                        }
-                        languages
-                    })
-            } else {
-                Vec::new()
-            };
+        let mut validated_languages = Vec::new();
+        if settings.selected_language == crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE {
+            for intent in self.recording_language_intents(&settings.selected_language) {
+                if let Some(language) = supported_keyboard_language_for_model(
+                    &intent,
+                    self.model_manager.as_ref(),
+                    &active_model,
+                ) {
+                    if !validated_languages.contains(&language) {
+                        validated_languages.push(language);
+                    }
+                } else {
+                    debug!(
+                        "Ignoring enabled keyboard language '{}' because model '{}' does not support it",
+                        intent, active_model
+                    );
+                }
+            }
+        }
+        if validated_languages.is_empty() {
+            validated_languages.push(effective_language_for_model(
+                &language_intent,
+                self.model_manager.as_ref(),
+                &active_model,
+            ));
+        }
+        let validated_language = validated_languages[0].clone();
+        let fallback_languages = validated_languages.into_iter().skip(1).collect::<Vec<_>>();
         if validated_language != settings.selected_language {
             debug!(
                 "Language intent '{}' resolved to '{}' for model '{}'",
@@ -1706,6 +1707,40 @@ fn effective_language_for_model(
         ),
         None => language_intent.to_string(),
     }
+}
+
+/// Intersect a keyboard's general BCP-47 language with the selected model's
+/// capabilities. Unlike `effective_language_for_model`, this never coerces an
+/// unsupported keyboard language to English or unrestricted auto-detection.
+fn supported_keyboard_language_for_model(
+    language_intent: &str,
+    model_manager: &ModelManager,
+    model_id: &str,
+) -> Option<String> {
+    match model_manager.get_model_info(model_id) {
+        Some(info) => matching_supported_language(language_intent, &info.supported_languages),
+        None => Some(language_intent.to_string()),
+    }
+}
+
+fn matching_supported_language(
+    language_intent: &str,
+    supported_languages: &[String],
+) -> Option<String> {
+    if language_intent == "auto"
+        || language_intent == crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE
+    {
+        return None;
+    }
+    if supported_languages.is_empty() {
+        return Some(language_intent.to_string());
+    }
+
+    let intent_base = language_intent.split('-').next()?;
+    supported_languages
+        .iter()
+        .find(|language| language.split('-').next() == Some(intent_base))
+        .cloned()
 }
 
 struct TranscribeCppRunPlan {
@@ -2189,6 +2224,26 @@ mod tests {
             &settings,
             false
         ));
+    }
+
+    #[test]
+    fn keyboard_language_matching_is_algorithmic_for_any_bcp47_base() {
+        for primary_length in 2..=8 {
+            let primary = "x".repeat(primary_length);
+            let model_code = format!("{primary}-Model");
+            let keyboard_code = format!("{primary}-Keybrd");
+            let supported = vec![model_code.clone()];
+
+            assert_eq!(
+                matching_supported_language(&keyboard_code, &supported),
+                Some(model_code)
+            );
+        }
+
+        assert_eq!(
+            matching_supported_language("xx-Keybrd", &["yy-Model".to_string()]),
+            None
+        );
     }
 
     #[test]

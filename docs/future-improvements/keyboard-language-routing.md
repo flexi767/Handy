@@ -1,14 +1,14 @@
 # Keyboard-language routing and retained-audio retry
 
-**Status:** Retained-audio retry is implemented. Direct macOS language-metadata
-mapping is a future improvement.
+**Status:** Retained-audio retry and direct macOS language-metadata mapping are
+implemented.
 
 ## Goal
 
-For the local English, German, and Bulgarian setup, Handy should treat the
-active keyboard layout as a strong language hint without losing a dictation
-when the wrong keyboard was selected. It must not fall back to unrestricted
-language detection or languages outside the user's enabled keyboards.
+Handy should treat the active keyboard layout as a strong language hint without
+losing a dictation when the wrong keyboard was selected. It must not fall back
+to unrestricted language detection or languages outside the user's enabled
+keyboards and the loaded model's supported languages.
 
 ## Current implementation
 
@@ -23,13 +23,15 @@ At recording start, `TranscriptionManager::snapshot_recording_language` asks
 1. The active keyboard language is first.
 2. The other supported languages represented by enabled macOS input sources
    follow.
-3. Duplicate languages and unsupported layouts are removed.
+3. Duplicate base languages and input sources without a usable language are
+   removed.
 
-Only English (`en-US`), German (`de-DE`), and Bulgarian (`bg-BG`) can enter the
-list. `TISCreateInputSourceList` is called with `includeAllInstalled = false`,
-so disabled keyboards do not become retry candidates. If the user selected an
-explicit language instead of **Follow keyboard**, the list contains only that
-language and no cross-language retry occurs.
+Any valid BCP 47 language can enter the initial list.
+`TISCreateInputSourceList` is called with `includeAllInstalled = false`, so
+disabled keyboards do not become retry candidates. Before inference, the list
+is intersected with the loaded model's advertised languages. If the user
+selected an explicit language instead of **Follow keyboard**, the list contains
+only that language and no cross-language retry occurs.
 
 The complete ordered list is frozen for the recording. Changing the keyboard
 while speaking therefore cannot change either the first attempt or its
@@ -83,30 +85,28 @@ During implementation, a recording that had previously failed because Handy
 passed unsupported `en-US` to Parakeet was replayed through the installed app.
 The corrected run passed `en` and returned a transcript successfully.
 
-## Future improvement: use macOS language metadata
+## macOS language-metadata mapping
 
-The current input-source mapper derives the language from the input source ID
-and localized name, recognizing values such as `ABC`, `German`, and
-`Bulgarian-Phonetic`. This is adequate for the configured Apple layouts but is
-less robust for renamed or third-party layouts.
+The general input-source mapper reads `kTISPropertyInputSourceLanguages` from each
+`TISInputSourceRef`. Its value is an ordered array of BCP 47 language
+identifiers, and the first entry is the language for which the input source is
+intended. Handy:
 
-macOS exposes `kTISPropertyInputSourceLanguages` on each `TISInputSourceRef`.
-Its value is an ordered array of BCP 47 language identifiers, and the first
-entry is the language for which the input source is intended. A future change
-should:
-
-1. Read `kTISPropertyInputSourceLanguages` for the active and enabled input
+1. Reads `kTISPropertyInputSourceLanguages` for the active and enabled input
    sources.
-2. Canonicalize the first non-empty BCP 47 identifier.
-3. Intersect its base language with the locally allowed set (`en`, `de`, `bg`)
-   and the loaded model's supported languages.
-4. Preserve the existing active-first candidate ordering and retained-audio
+2. Normalizes the first non-empty BCP 47 identifier while preserving its
+   region, script, and other subtags.
+3. Uses its base language to intersect it with the loaded model's supported
+   languages and passes the model's exact advertised code to inference.
+4. Preserves the existing active-first candidate ordering and retained-audio
    retry behavior.
-5. Keep input-source ID/name recognition only as a fallback when the metadata
-   is absent or empty.
+5. Asks macOS to canonicalize the localized input-source name only as a
+   fallback when the metadata is absent or empty.
 
-This would replace layout-name heuristics without broadening the allowed
-language set.
+An input source with non-empty metadata is authoritative; its name cannot
+override that metadata. The decoder itself does not encode a fixed list of
+languages. This supports renamed and third-party layouts, while the later model
+intersection prevents unsupported languages from becoming inference attempts.
 
 ## Relevant implementation areas
 
@@ -117,4 +117,3 @@ language set.
 - `src-tauri/src/actions.rs`: recording-start snapshot and end-of-processing
   cleanup.
 - `src-tauri/src/utils.rs`: cancellation cleanup.
-
