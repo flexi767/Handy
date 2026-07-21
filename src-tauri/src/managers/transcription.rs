@@ -267,9 +267,10 @@ pub struct TranscriptionManager {
     /// `is_model_loaded()` consults this so the model still reports "loaded"
     /// while the worker holds it.
     active_engine_lease: Arc<AtomicU64>,
-    /// Concrete language captured at recording start. This keeps a keyboard
-    /// layout change during recording from changing the language at inference.
-    recording_language: Arc<Mutex<Option<String>>>,
+    /// Ordered language candidates captured at recording start. The active
+    /// keyboard comes first; enabled supported keyboards are retained as
+    /// fallbacks so the same audio can be retried without another dictation.
+    recording_languages: Arc<Mutex<Vec<String>>>,
 }
 
 impl TranscriptionManager {
@@ -290,7 +291,7 @@ impl TranscriptionManager {
             next_stream_worker_id: Arc::new(AtomicU64::new(1)),
             active_stream_worker: Arc::new(AtomicU64::new(0)),
             active_engine_lease: Arc::new(AtomicU64::new(0)),
-            recording_language: Arc::new(Mutex::new(None)),
+            recording_languages: Arc::new(Mutex::new(Vec::new())),
         };
 
         // Start the idle watcher
@@ -376,36 +377,56 @@ impl TranscriptionManager {
     }
 
     pub fn snapshot_recording_language(&self, persisted_language: &str) {
-        let language = crate::keyboard_language::language_for_recording(persisted_language);
+        let languages =
+            crate::keyboard_language::language_candidates_for_recording(persisted_language);
+        debug!("Recording language candidates: {:?}", languages);
         *self
-            .recording_language
+            .recording_languages
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(language);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = languages;
     }
 
     pub fn clear_recording_language_snapshot(&self) {
         *self
-            .recording_language
+            .recording_languages
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Vec::new();
     }
 
     pub fn recording_language_snapshot(&self) -> Option<String> {
-        self.recording_language
+        self.recording_languages
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .first()
+            .cloned()
     }
 
     fn recording_language_intent(&self, persisted_language: &str) -> String {
-        self.recording_language
+        self.recording_languages
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+            .first()
+            .cloned()
             .unwrap_or_else(|| {
                 crate::keyboard_language::normalize_persisted_language(persisted_language)
                     .to_string()
             })
+    }
+
+    fn recording_language_intents(&self, persisted_language: &str) -> Vec<String> {
+        let languages = self
+            .recording_languages
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if languages.is_empty() {
+            vec![
+                crate::keyboard_language::normalize_persisted_language(persisted_language)
+                    .to_string(),
+            ]
+        } else {
+            languages
+        }
     }
 
     pub fn effective_language_for_current_model(&self, settings: &AppSettings) -> String {
@@ -1213,6 +1234,28 @@ impl TranscriptionManager {
             self.model_manager.as_ref(),
             &active_model,
         );
+        let fallback_languages =
+            if settings.selected_language == crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE {
+                self.recording_language_intents(&settings.selected_language)
+                    .into_iter()
+                    .skip(1)
+                    .map(|language| {
+                        effective_language_for_model(
+                            &language,
+                            self.model_manager.as_ref(),
+                            &active_model,
+                        )
+                    })
+                    .filter(|language| language != "auto" && language != &validated_language)
+                    .fold(Vec::new(), |mut languages, language| {
+                        if !languages.contains(&language) {
+                            languages.push(language);
+                        }
+                        languages
+                    })
+            } else {
+                Vec::new()
+            };
         if validated_language != settings.selected_language {
             debug!(
                 "Language intent '{}' resolved to '{}' for model '{}'",
@@ -1281,48 +1324,94 @@ impl TranscriptionManager {
             let transcribe_result = catch_unwind(AssertUnwindSafe(|| -> Result<String> {
                 match &mut engine {
                     LoadedEngine::TranscribeCpp(session) => {
-                        // Custom words become the initial prompt ONLY for models
-                        // that accept one (whisper family). Attaching the
-                        // whisper run extension to a non-whisper arch is rejected
-                        // with INVALID_ARG, so skip it there and let the fuzzy
-                        // post-correction handle custom words instead.
-                        let family = if settings.custom_words.is_empty() || !model_is_whisper {
-                            None
-                        } else {
-                            Some(RunExtension::Whisper(WhisperRunOptions {
-                                initial_prompt: Some(settings.custom_words.join(", ")),
+                        let mut language_attempts = vec![validated_language.clone()];
+                        language_attempts.extend(fallback_languages.iter().cloned());
+                        let mut last_empty_result = String::new();
+                        let mut last_error = None;
+
+                        for (attempt_index, attempt_language) in
+                            language_attempts.iter().enumerate()
+                        {
+                            // Custom words become the initial prompt ONLY for models
+                            // that accept one (whisper family). Attaching the
+                            // whisper run extension to a non-whisper arch is rejected
+                            // with INVALID_ARG, so skip it there and let the fuzzy
+                            // post-correction handle custom words instead.
+                            let family = if settings.custom_words.is_empty() || !model_is_whisper {
+                                None
+                            } else {
+                                Some(RunExtension::Whisper(WhisperRunOptions {
+                                    initial_prompt: Some(settings.custom_words.join(", ")),
+                                    ..Default::default()
+                                }))
+                            };
+
+                            let run_plan = transcribe_cpp_run_plan(
+                                settings.translate_to_english,
+                                attempt_language,
+                                &model_languages,
+                                model_supports_translate,
+                            );
+
+                            // A fallback must remain a forced installed-keyboard
+                            // language. Never turn it into unrestricted detection
+                            // when live model metadata does not advertise it.
+                            if attempt_index > 0 && run_plan.language.is_none() {
+                                debug!(
+                                    "Skipping keyboard-language fallback '{}' because the loaded model does not advertise it",
+                                    attempt_language
+                                );
+                                continue;
+                            }
+
+                            let run_options = RunOptions {
+                                task: run_plan.task,
+                                language: run_plan.language,
+                                target_language: run_plan.target_language,
+                                family,
                                 ..Default::default()
-                            }))
-                        };
+                            };
 
-                        let run_plan = transcribe_cpp_run_plan(
-                            settings.translate_to_english,
-                            &validated_language,
-                            &model_languages,
-                            model_supports_translate,
-                        );
+                            debug!(
+                                "transcribe-cpp run: task={:?}, language={:?}, initial_prompt={}",
+                                run_options.task,
+                                run_options.language,
+                                run_options.family.is_some()
+                            );
 
-                        let run_options = RunOptions {
-                            task: run_plan.task,
-                            language: run_plan.language,
-                            target_language: run_plan.target_language,
-                            family,
-                            ..Default::default()
-                        };
+                            let text = match session.run(&audio, &run_options) {
+                                Ok(transcription) => transcription.text,
+                                Err(error) => {
+                                    warn!(
+                                        "Transcription attempt for '{}' failed: {}; retained audio will be retried when another installed keyboard language is available",
+                                        attempt_language, error
+                                    );
+                                    last_error = Some(error.to_string());
+                                    continue;
+                                }
+                            };
 
-                        debug!(
-                            "transcribe-cpp run: task={:?}, language={:?}, initial_prompt={}",
-                            run_options.task,
-                            run_options.language,
-                            run_options.family.is_some()
-                        );
+                            if transcription_result_is_usable(&text, &settings, model_is_whisper) {
+                                return Ok(text);
+                            }
 
-                        session
-                            .run(&audio, &run_options)
-                            .map(|t| t.text)
-                            .map_err(|e| {
-                                anyhow::anyhow!("transcribe-cpp transcription failed: {}", e)
-                            })
+                            last_empty_result = text;
+                            if let Some(next_language) = language_attempts.get(attempt_index + 1) {
+                                info!(
+                                    "No usable transcript for '{}'; retrying retained audio with installed keyboard language '{}'",
+                                    attempt_language, next_language
+                                );
+                            }
+                        }
+
+                        if !last_empty_result.is_empty() || last_error.is_none() {
+                            Ok(last_empty_result)
+                        } else {
+                            Err(anyhow::anyhow!(
+                                "transcribe-cpp transcription failed for all installed keyboard languages: {}",
+                                last_error.unwrap_or_else(|| "unknown error".to_string())
+                            ))
+                        }
                     }
                     LoadedEngine::Parakeet(parakeet_engine) => {
                         let params = ParakeetParams {
@@ -1610,34 +1699,11 @@ fn effective_language_for_model(
     model_id: &str,
 ) -> String {
     match model_manager.get_model_info(model_id) {
-        Some(info) => {
-            let is_strict_locale = matches!(
-                language_intent,
-                crate::keyboard_language::ENGLISH_LANGUAGE
-                    | crate::keyboard_language::GERMAN_LANGUAGE
-                    | crate::keyboard_language::BULGARIAN_LANGUAGE
-            );
-            let base = language_intent.split('-').next().unwrap_or(language_intent);
-            let supports_base = info
-                .supported_languages
-                .iter()
-                .any(|language| language.split('-').next() == Some(base));
-
-            // This setup's transcribe-cpp backend accepts the exact BCP-47
-            // locales even when older GGUF metadata advertises only base codes.
-            if matches!(info.engine_type, EngineType::TranscribeCpp)
-                && is_strict_locale
-                && supports_base
-            {
-                language_intent.to_string()
-            } else {
-                crate::managers::model::effective_language(
-                    language_intent,
-                    &info.supported_languages,
-                    info.supports_language_detection,
-                )
-            }
-        }
+        Some(info) => crate::managers::model::effective_language(
+            language_intent,
+            &info.supported_languages,
+            info.supports_language_detection,
+        ),
         None => language_intent.to_string(),
     }
 }
@@ -1664,11 +1730,12 @@ fn transcribe_cpp_run_plan(
     // capabilities().languages); otherwise auto-detect rather than failing with
     // UNSUPPORTED_LANGUAGE. Language-agnostic models report an empty list, so
     // they always stay on auto.
-    let language = requested_language.filter(|language| {
-        let requested_base = language.split('-').next();
-        model_languages
-            .iter()
-            .any(|supported| supported == language || supported.split('-').next() == requested_base)
+    let language = requested_language.and_then(|requested| {
+        let requested_base = requested.split('-').next();
+        model_languages.iter().find_map(|supported| {
+            (supported == &requested || supported.split('-').next() == requested_base)
+                .then(|| supported.clone())
+        })
     });
     let (task, target_language) = cpp_translation_task(
         translate_to_english,
@@ -1705,6 +1772,16 @@ fn post_process_transcription_text(
             &settings.custom_filler_words,
         )
     })
+}
+
+fn transcription_result_is_usable(
+    raw: &str,
+    settings: &AppSettings,
+    custom_words_already_prompted: bool,
+) -> bool {
+    !post_process_transcription_text(raw.to_string(), settings, custom_words_already_prompted)
+        .trim()
+        .is_empty()
 }
 
 /// Optional text cleanup must never discard a successful model result. The
@@ -2102,6 +2179,19 @@ mod tests {
     }
 
     #[test]
+    fn retry_eligibility_uses_the_same_cleanup_as_final_output() {
+        let settings = AppSettings::default();
+
+        assert!(!transcription_result_is_usable("   ", &settings, false));
+        assert!(!transcription_result_is_usable("uh uhm", &settings, false));
+        assert!(transcription_result_is_usable(
+            "A useful transcript",
+            &settings,
+            false
+        ));
+    }
+
+    #[test]
     fn transcribe_cpp_run_plan_maps_chinese_variants() {
         let plan = transcribe_cpp_run_plan(false, "zh-Hant", &languages(&["zh"]), true);
 
@@ -2120,11 +2210,11 @@ mod tests {
     }
 
     #[test]
-    fn transcribe_cpp_run_plan_preserves_strict_locale_with_base_metadata() {
+    fn transcribe_cpp_run_plan_maps_strict_locale_to_model_base_code() {
         let plan = transcribe_cpp_run_plan(false, "bg-BG", &languages(&["en", "de", "bg"]), false);
 
         assert!(matches!(plan.task, Task::Transcribe));
-        assert_eq!(plan.language.as_deref(), Some("bg-BG"));
+        assert_eq!(plan.language.as_deref(), Some("bg"));
         assert_eq!(plan.target_language, None);
     }
 
