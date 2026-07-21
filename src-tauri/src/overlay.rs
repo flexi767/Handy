@@ -1,7 +1,10 @@
 use crate::input;
+use crate::managers::transcription::TranscriptionManager;
 use crate::settings;
 use crate::settings::{OverlayPosition, OverlayStyle};
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize};
 
@@ -61,6 +64,12 @@ fn overlay_dimensions(state: &str) -> (f64, f64) {
 
 static LAST_MIC_LEVEL_EMIT: AtomicU64 = AtomicU64::new(0);
 const EMIT_THROTTLE_MS: u64 = 33; // ~30 FPS
+
+#[derive(Clone, Serialize)]
+struct OverlayShowEvent {
+    state: String,
+    language: Option<String>,
+}
 
 #[cfg(target_os = "macos")]
 const OVERLAY_TOP_OFFSET: f64 = 46.0;
@@ -408,7 +417,16 @@ fn show_overlay_state(app_handle: &AppHandle, state: &str) {
         #[cfg(target_os = "windows")]
         force_overlay_topmost(&overlay_window);
 
-        let _ = overlay_window.emit("show-overlay", state);
+        let language = app_handle
+            .try_state::<Arc<TranscriptionManager>>()
+            .and_then(|manager| manager.recording_language_snapshot());
+        let _ = overlay_window.emit(
+            "show-overlay",
+            OverlayShowEvent {
+                state: state.to_string(),
+                language,
+            },
+        );
         log::debug!(
             "overlay '{}': set_size={:?} pos_calc={:?} set_pos={:?} show={:?}",
             state,

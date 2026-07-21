@@ -255,6 +255,7 @@
   display: flex;
   padding-left: 5px;
   align-items: center;
+  gap: 6px;
   justify-self: start;
 }
 .sbase-r {
@@ -270,6 +271,13 @@
   background: var(--s-accent);
   flex: none;
   animation: sdot-pulse 1.9s infinite;
+}
+.slanguage {
+  color: var(--s-muted);
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0.05em;
 }
 @keyframes sdot-pulse {
   0% {

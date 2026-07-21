@@ -14,6 +14,11 @@ import { getLanguageDirection } from "@/lib/utils/rtl";
 
 type OverlayState = "recording" | "streaming" | "transcribing" | "processing";
 
+interface OverlayShowPayload {
+  state: OverlayState;
+  language: string | null;
+}
+
 // Number of reactive bars in the waveform (the simple, smoothed style shared by
 // every overlay form). Mic levels arrive as 16 FFT buckets; we take the first N.
 const WAVE_BARS = 9;
@@ -22,6 +27,7 @@ const RecordingOverlay: React.FC = () => {
   const { t } = useTranslation();
   const [isVisible, setIsVisible] = useState(false);
   const [state, setState] = useState<OverlayState>("recording");
+  const [recordingLanguage, setRecordingLanguage] = useState("EN");
   const [levels, setLevels] = useState<number[]>(Array(WAVE_BARS).fill(0));
   const [streamText, setStreamText] = useState<StreamTextEvent>({
     committed: "",
@@ -64,7 +70,14 @@ const RecordingOverlay: React.FC = () => {
         } catch {
           // Keep the previous/default placement if settings can't be read.
         }
-        const overlayState = event.payload as OverlayState;
+        // Accept the old string payload during a hot reload, but normal builds
+        // receive the concrete language captured when recording began.
+        const payload = event.payload as OverlayShowPayload | OverlayState;
+        const overlayState =
+          typeof payload === "string" ? payload : payload.state;
+        if (typeof payload !== "string" && payload.language) {
+          setRecordingLanguage(payload.language.split("-", 1)[0].toUpperCase());
+        }
         setState(overlayState);
         if (overlayState === "recording" || overlayState === "streaming") {
           setStreamText({ committed: "", tentative: "" });
@@ -186,6 +199,7 @@ const RecordingOverlay: React.FC = () => {
     <div className="sbase">
       <div className="sbase-l">
         <span className="sdot" />
+        <span className="slanguage">{recordingLanguage}</span>
       </div>
       {waveform}
       <div className="sbase-r">

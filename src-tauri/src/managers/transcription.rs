@@ -390,6 +390,13 @@ impl TranscriptionManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
     }
 
+    pub fn recording_language_snapshot(&self) -> Option<String> {
+        self.recording_language
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
     fn recording_language_intent(&self, persisted_language: &str) -> String {
         self.recording_language
             .lock()
