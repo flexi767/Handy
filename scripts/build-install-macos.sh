@@ -8,6 +8,7 @@ readonly developer_dir="/Applications/Xcode.app/Contents/Developer"
 readonly built_app="src-tauri/target/release/bundle/macos/Handy.app"
 readonly installed_app="/Applications/Handy.app"
 readonly built_executable="$built_app/Contents/MacOS/handy"
+readonly installed_executable="$installed_app/Contents/MacOS/handy"
 readonly bundled_onnxruntime="$built_app/Contents/Frameworks/libonnxruntime.1.dylib"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -67,7 +68,22 @@ signature_info="$(codesign -dvv "$built_app" 2>&1)"
 grep -Fq "Authority=$signing_identity" <<<"$signature_info"
 grep -Fq "TeamIdentifier=$development_team" <<<"$signature_info"
 
-pkill -x Handy >/dev/null 2>&1 || true
+# The process name is the lowercase executable (`handy`), not the bundle name
+# (`Handy`). Stop only the installed app and wait for it to exit; otherwise
+# LaunchServices keeps the old executable alive and `open` never starts the
+# freshly copied build.
+pkill -TERM -f -x "$installed_executable" >/dev/null 2>&1 || true
+for _ in {1..50}; do
+  if ! pgrep -f -x "$installed_executable" >/dev/null; then
+    break
+  fi
+  sleep 0.1
+done
+if pgrep -f -x "$installed_executable" >/dev/null; then
+  echo "Installed Handy process did not exit: $installed_executable" >&2
+  exit 1
+fi
+
 rm -rf "$installed_app"
 ditto "$built_app" "$installed_app"
 codesign --verify --deep --strict "$installed_app"

@@ -63,6 +63,7 @@ fn overlay_dimensions(state: &str) -> (f64, f64) {
 }
 
 static LAST_MIC_LEVEL_EMIT: AtomicU64 = AtomicU64::new(0);
+static LAST_MIC_LEVEL_LOG: AtomicU64 = AtomicU64::new(0);
 const EMIT_THROTTLE_MS: u64 = 33; // ~30 FPS
 
 #[derive(Clone, Serialize)]
@@ -542,5 +543,19 @@ pub fn emit_levels(app_handle: &AppHandle, levels: &[f32]) {
     // `emit_to` with the overlay's window label produces a single
     // eval_script call per callback, cutting the per-callback WebKit
     // dispatch work in half.
-    let _ = app_handle.emit_to("recording_overlay", "mic-level", levels);
+    let emit_result = app_handle.emit_to("recording_overlay", "mic-level", levels);
+
+    // Keep one lightweight breadcrumb per second in the app log. This makes a
+    // frozen waveform diagnosable without logging every audio callback or any
+    // microphone samples: only the strongest normalized visualizer bucket and
+    // whether Tauri accepted the overlay event are recorded.
+    let last_log = LAST_MIC_LEVEL_LOG.load(Ordering::Relaxed);
+    if now.saturating_sub(last_log) >= 1_000 {
+        LAST_MIC_LEVEL_LOG.store(now, Ordering::Relaxed);
+        let peak = levels.iter().copied().fold(0.0_f32, f32::max);
+        match emit_result {
+            Ok(()) => log::info!("Overlay mic-level event emitted (peak: {:.3})", peak),
+            Err(error) => log::warn!("Failed to emit overlay mic-level event: {error}"),
+        }
+    }
 }

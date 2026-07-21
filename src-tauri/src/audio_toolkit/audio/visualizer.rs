@@ -1,7 +1,12 @@
 use rustfft::{num_complex::Complex32, Fft, FftPlanner};
 use std::sync::Arc;
 
-const DB_MIN: f32 = -55.0;
+// Individual FFT bands sit well below the full-band microphone level. A -55 dB
+// cutoff flattened ordinary speech to zero on quiet MacBook microphones, which
+// made the overlay appear frozen even while usable audio was being recorded.
+// Keep true silence at zero while retaining enough headroom for conversational
+// speech to animate the waveform.
+const DB_MIN: f32 = -75.0;
 const DB_MAX: f32 = -8.0;
 const GAIN: f32 = 1.3;
 const CURVE_POWER: f32 = 0.7;
@@ -152,5 +157,35 @@ impl AudioVisualiser {
         self.buffer.clear();
         // Reset noise floor to initial values
         self.noise_floor.fill(-40.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioVisualiser;
+
+    #[test]
+    fn silence_stays_flat() {
+        let mut visualizer = AudioVisualiser::new(48_000, 2_048, 16, 400.0, 4_000.0);
+        let levels = visualizer.feed(&vec![0.0; 2_048]).unwrap();
+
+        assert!(levels.iter().all(|level| *level == 0.0));
+    }
+
+    #[test]
+    fn quiet_speech_band_signal_remains_visible() {
+        let mut visualizer = AudioVisualiser::new(48_000, 2_048, 16, 400.0, 4_000.0);
+        let samples = (0..2_048)
+            .map(|index| {
+                let phase = 2.0 * std::f32::consts::PI * 1_000.0 * index as f32 / 48_000.0;
+                phase.sin() * 0.003
+            })
+            .collect::<Vec<_>>();
+        let levels = visualizer.feed(&samples).unwrap();
+
+        assert!(
+            levels.iter().copied().fold(0.0_f32, f32::max) > 0.1,
+            "quiet speech levels were flattened: {levels:?}"
+        );
     }
 }

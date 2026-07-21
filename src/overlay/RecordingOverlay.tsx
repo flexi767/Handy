@@ -20,8 +20,22 @@ interface OverlayShowPayload {
 }
 
 // Number of reactive bars in the waveform (the simple, smoothed style shared by
-// every overlay form). Mic levels arrive as 16 FFT buckets; we take the first N.
+// every overlay form). Mic levels arrive as 16 FFT buckets spanning the voice
+// spectrum; the UI resamples the full range rather than discarding high bands.
 const WAVE_BARS = 9;
+
+const resampleLevels = (source: number[], count: number): number[] => {
+  if (source.length === 0) return Array(count).fill(0);
+  if (count === 1) return [Math.max(...source)];
+
+  return Array.from({ length: count }, (_, index) => {
+    const position = (index * (source.length - 1)) / (count - 1);
+    const lower = Math.floor(position);
+    const upper = Math.min(source.length - 1, Math.ceil(position));
+    const mix = position - lower;
+    return source[lower] * (1 - mix) + source[upper] * mix;
+  });
+};
 
 const RecordingOverlay: React.FC = () => {
   const { t } = useTranslation();
@@ -46,7 +60,7 @@ const RecordingOverlay: React.FC = () => {
   // while overflowing, so the resting first line stays crisp flush under the pill.
   const [overflowing, setOverflowing] = useState(false);
 
-  const smoothedLevelsRef = useRef<number[]>(Array(16).fill(0));
+  const smoothedLevelsRef = useRef<number[]>(Array(WAVE_BARS).fill(0));
   // Live-text scroll-back: the text region "sticks" to the newest line while the
   // user is at the bottom; if they scroll up to read history, auto-follow pauses
   // until they scroll back down.
@@ -97,14 +111,15 @@ const RecordingOverlay: React.FC = () => {
 
       const unlistenLevel = await listen<number[]>("mic-level", (event) => {
         const newLevels = event.payload as number[];
-        // Exponential smoothing across the 16 buckets, then take the first N
-        // bars for the shared waveform.
+        const waveformLevels = resampleLevels(newLevels, WAVE_BARS);
+        // Exponential smoothing keeps the real microphone waveform readable
+        // without replacing silence with decorative motion.
         const smoothed = smoothedLevelsRef.current.map((prev, i) => {
-          const target = newLevels[i] || 0;
+          const target = waveformLevels[i] || 0;
           return prev * 0.7 + target * 0.3;
         });
         smoothedLevelsRef.current = smoothed;
-        setLevels(smoothed.slice(0, WAVE_BARS));
+        setLevels(smoothed);
       });
 
       const unlistenStream = await events.streamTextEvent.listen((event) => {
