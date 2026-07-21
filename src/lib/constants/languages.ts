@@ -9,7 +9,7 @@ export const FOLLOW_KEYBOARD_LANGUAGE = "follow_keyboard";
 export const STRICT_TRANSCRIPTION_LANGUAGES: Language[] = [
   {
     value: FOLLOW_KEYBOARD_LANGUAGE,
-    label: "Follow Keyboard — English/German/Bulgarian only",
+    label: "Follow Keyboard Language",
   },
   { value: "en-US", label: "English" },
   { value: "de-DE", label: "German" },

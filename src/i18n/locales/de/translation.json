@@ -210,8 +210,8 @@
         "searchPlaceholder": "Sprachen suchen...",
         "noResults": "Keine Sprachen gefunden",
         "auto": "Auto",
-        "strictDescription": "Verwende Englisch, Deutsch oder Bulgarisch für die Spracherkennung. Der Modus „Tastaturlayout folgen“ übernimmt beim Start der Aufnahme das aktive Layout.",
-        "followKeyboard": "Tastaturlayout folgen — nur Englisch/Deutsch/Bulgarisch"
+        "keyboardDescription": "Verwendet beim Start der Aufnahme die Sprache des aktiven Tastaturlayouts.",
+        "followKeyboard": "Tastatursprache folgen"
       },
       "pushToTalk": {
         "label": "Push-to-Talk",

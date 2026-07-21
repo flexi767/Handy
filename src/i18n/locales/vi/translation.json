@@ -210,8 +210,8 @@
         "searchPlaceholder": "Tìm kiếm ngôn ngữ...",
         "noResults": "Không tìm thấy ngôn ngữ",
         "auto": "Tự động",
-        "strictDescription": "Use English, German, or Bulgarian for speech recognition. Keyboard-following mode snapshots the active layout when recording begins.",
-        "followKeyboard": "Follow Keyboard — English/German/Bulgarian only"
+        "keyboardDescription": "Uses the language associated with the active keyboard layout when recording begins.",
+        "followKeyboard": "Follow Keyboard Language"
       },
       "pushToTalk": {
         "label": "Nhấn để nói",

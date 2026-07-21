@@ -189,8 +189,8 @@
         "searchPlaceholder": "البحث عن اللغات...",
         "noResults": "لم يتم العثور على لغات",
         "auto": "تلقائي",
-        "strictDescription": "Use English, German, or Bulgarian for speech recognition. Keyboard-following mode snapshots the active layout when recording begins.",
-        "followKeyboard": "Follow Keyboard — English/German/Bulgarian only"
+        "keyboardDescription": "Uses the language associated with the active keyboard layout when recording begins.",
+        "followKeyboard": "Follow Keyboard Language"
       },
       "pushToTalk": {
         "label": "اضغط للتحدث",

@@ -192,8 +192,8 @@
         "searchPlaceholder": "भाषाएं खोजें...",
         "noResults": "कोई भाषा नहीं मिली",
         "auto": "ऑटो",
-        "strictDescription": "Use English, German, or Bulgarian for speech recognition. Keyboard-following mode snapshots the active layout when recording begins.",
-        "followKeyboard": "Follow Keyboard — English/German/Bulgarian only"
+        "keyboardDescription": "Uses the language associated with the active keyboard layout when recording begins.",
+        "followKeyboard": "Follow Keyboard Language"
       },
       "pushToTalk": {
         "label": "पुश टू टॉक",

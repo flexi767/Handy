@@ -139,7 +139,7 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
   return (
     <SettingContainer
       title={t("settings.general.language.title")}
-      description={t("settings.general.language.strictDescription")}
+      description={t("settings.general.language.keyboardDescription")}
       descriptionMode={descriptionMode}
       grouped={grouped}
     >

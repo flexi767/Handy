@@ -189,11 +189,11 @@
       "language": {
         "title": "Language",
         "description": "Use English, German, or Bulgarian for speech recognition. Keyboard-following mode snapshots the active layout when recording begins.",
-        "strictDescription": "Use English, German, or Bulgarian for speech recognition. Keyboard-following mode snapshots the active layout when recording begins.",
+        "keyboardDescription": "Uses the language associated with the active keyboard layout when recording begins.",
         "searchPlaceholder": "Search languages...",
         "noResults": "No languages found",
         "auto": "Auto",
-        "followKeyboard": "Follow Keyboard — English/German/Bulgarian only"
+        "followKeyboard": "Follow Keyboard Language"
       },
       "pushToTalk": {
         "label": "Push To Talk",

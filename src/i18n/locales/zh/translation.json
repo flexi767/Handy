@@ -210,8 +210,8 @@
         "searchPlaceholder": "搜索语言...",
         "noResults": "未找到语言",
         "auto": "自动",
-        "strictDescription": "Use English, German, or Bulgarian for speech recognition. Keyboard-following mode snapshots the active layout when recording begins.",
-        "followKeyboard": "Follow Keyboard — English/German/Bulgarian only"
+        "keyboardDescription": "Uses the language associated with the active keyboard layout when recording begins.",
+        "followKeyboard": "Follow Keyboard Language"
       },
       "pushToTalk": {
         "label": "按住说话",
