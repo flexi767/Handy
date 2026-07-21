@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "code-review-graph": {
+      "command": "./scripts/code-review-graph-mcp.sh",
+      "args": [],
+      "type": "stdio"
+    }
+  }
+}

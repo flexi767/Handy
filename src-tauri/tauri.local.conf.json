@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "macOS": {
+      "entitlements": "Entitlements.local.plist",
+      "minimumSystemVersion": "26.0",
+      "signingIdentity": "Apple Development: i@jlzov.com (SFRBKW6P78)"
+    }
+  }
+}

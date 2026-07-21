@@ -42,3 +42,5 @@ blob-report/
 
 # Nix build output
 result
+# Added by code-review-graph
+.code-review-graph/
