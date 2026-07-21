@@ -267,6 +267,9 @@ pub struct TranscriptionManager {
     /// `is_model_loaded()` consults this so the model still reports "loaded"
     /// while the worker holds it.
     active_engine_lease: Arc<AtomicU64>,
+    /// Concrete language captured at recording start. This keeps a keyboard
+    /// layout change during recording from changing the language at inference.
+    recording_language: Arc<Mutex<Option<String>>>,
 }
 
 impl TranscriptionManager {
@@ -287,6 +290,7 @@ impl TranscriptionManager {
             next_stream_worker_id: Arc::new(AtomicU64::new(1)),
             active_stream_worker: Arc::new(AtomicU64::new(0)),
             active_engine_lease: Arc::new(AtomicU64::new(0)),
+            recording_language: Arc::new(Mutex::new(None)),
         };
 
         // Start the idle watcher
@@ -369,6 +373,40 @@ impl TranscriptionManager {
             warn!("Engine mutex was poisoned by a previous panic, recovering");
             poisoned.into_inner()
         })
+    }
+
+    pub fn snapshot_recording_language(&self, persisted_language: &str) {
+        let language = crate::keyboard_language::language_for_recording(persisted_language);
+        *self
+            .recording_language
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(language);
+    }
+
+    pub fn clear_recording_language_snapshot(&self) {
+        *self
+            .recording_language
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    fn recording_language_intent(&self, persisted_language: &str) -> String {
+        self.recording_language
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+            .unwrap_or_else(|| {
+                crate::keyboard_language::normalize_persisted_language(persisted_language)
+                    .to_string()
+            })
+    }
+
+    pub fn effective_language_for_current_model(&self, settings: &AppSettings) -> String {
+        let active_model = self
+            .get_current_model()
+            .unwrap_or_else(|| settings.selected_model.clone());
+        let language_intent = self.recording_language_intent(&settings.selected_language);
+        effective_language_for_model(&language_intent, self.model_manager.as_ref(), &active_model)
     }
 
     pub fn is_model_loaded(&self) -> bool {
@@ -892,8 +930,9 @@ impl TranscriptionManager {
         // Build run options mirroring the offline transcribe-cpp path: task +
         // language gated against what the model actually advertises.
         let settings = get_settings(&self.app_handle);
+        let language_intent = self.recording_language_intent(&settings.selected_language);
         let effective_language =
-            effective_language_for_model(&settings, self.model_manager.as_ref(), &model_id);
+            effective_language_for_model(&language_intent, self.model_manager.as_ref(), &model_id);
         let run_plan = transcribe_cpp_run_plan(
             settings.translate_to_english,
             &effective_language,
@@ -1161,8 +1200,12 @@ impl TranscriptionManager {
         // will actually use. The coercion is capability-aware (a must-pick model
         // never receives "auto") and computed fresh here — it is never written
         // back to settings, so the intent survives switching models and back.
-        let validated_language =
-            effective_language_for_model(&settings, self.model_manager.as_ref(), &active_model);
+        let language_intent = self.recording_language_intent(&settings.selected_language);
+        let validated_language = effective_language_for_model(
+            &language_intent,
+            self.model_manager.as_ref(),
+            &active_model,
+        );
         if validated_language != settings.selected_language {
             debug!(
                 "Language intent '{}' resolved to '{}' for model '{}'",
@@ -1555,17 +1598,40 @@ fn normalize_cjk_language(language: &str) -> &str {
 /// Resolve the persisted language intent into the language a specific model can
 /// use without writing the coerced value back to settings.
 fn effective_language_for_model(
-    settings: &AppSettings,
+    language_intent: &str,
     model_manager: &ModelManager,
     model_id: &str,
 ) -> String {
     match model_manager.get_model_info(model_id) {
-        Some(info) => crate::managers::model::effective_language(
-            &settings.selected_language,
-            &info.supported_languages,
-            info.supports_language_detection,
-        ),
-        None => settings.selected_language.clone(),
+        Some(info) => {
+            let is_strict_locale = matches!(
+                language_intent,
+                crate::keyboard_language::ENGLISH_LANGUAGE
+                    | crate::keyboard_language::GERMAN_LANGUAGE
+                    | crate::keyboard_language::BULGARIAN_LANGUAGE
+            );
+            let base = language_intent.split('-').next().unwrap_or(language_intent);
+            let supports_base = info
+                .supported_languages
+                .iter()
+                .any(|language| language.split('-').next() == Some(base));
+
+            // This setup's transcribe-cpp backend accepts the exact BCP-47
+            // locales even when older GGUF metadata advertises only base codes.
+            if matches!(info.engine_type, EngineType::TranscribeCpp)
+                && is_strict_locale
+                && supports_base
+            {
+                language_intent.to_string()
+            } else {
+                crate::managers::model::effective_language(
+                    language_intent,
+                    &info.supported_languages,
+                    info.supports_language_detection,
+                )
+            }
+        }
+        None => language_intent.to_string(),
     }
 }
 
@@ -1591,7 +1657,12 @@ fn transcribe_cpp_run_plan(
     // capabilities().languages); otherwise auto-detect rather than failing with
     // UNSUPPORTED_LANGUAGE. Language-agnostic models report an empty list, so
     // they always stay on auto.
-    let language = requested_language.filter(|lang| model_languages.iter().any(|l| l == lang));
+    let language = requested_language.filter(|language| {
+        let requested_base = language.split('-').next();
+        model_languages
+            .iter()
+            .any(|supported| supported == language || supported.split('-').next() == requested_base)
+    });
     let (task, target_language) = cpp_translation_task(
         translate_to_english,
         model_supports_translate,
@@ -2038,6 +2109,15 @@ mod tests {
 
         assert!(matches!(plan.task, Task::Transcribe));
         assert_eq!(plan.language.as_deref(), Some("en"));
+        assert_eq!(plan.target_language, None);
+    }
+
+    #[test]
+    fn transcribe_cpp_run_plan_preserves_strict_locale_with_base_metadata() {
+        let plan = transcribe_cpp_run_plan(false, "bg-BG", &languages(&["en", "de", "bg"]), false);
+
+        assert!(matches!(plan.task, Task::Transcribe));
+        assert_eq!(plan.language.as_deref(), Some("bg-BG"));
         assert_eq!(plan.target_language, None);
     }
 

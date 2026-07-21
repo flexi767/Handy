@@ -191,7 +191,9 @@
         "description": "Vælg sproget til talegenkendelse. Auto tyder automatisk sproget, mens valg af et specifikt sprog kan forbedre nøjagtigheden for det pågældende sprog.",
         "searchPlaceholder": "Søg efter sprog...",
         "noResults": "Ingen sprog fundet",
-        "auto": "Auto"
+        "auto": "Auto",
+        "strictDescription": "Use English, German, or Bulgarian for speech recognition. Keyboard-following mode snapshots the active layout when recording begins.",
+        "followKeyboard": "Follow Keyboard — English/German/Bulgarian only"
       },
       "pushToTalk": {
         "label": "Tryk-for-at-tale",

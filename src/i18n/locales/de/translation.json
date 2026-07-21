@@ -209,7 +209,9 @@
         "description": "Wähle die Sprache für die Spracherkennung. Auto erkennt die Sprache automatisch, die Auswahl einer bestimmten Sprache kann die Genauigkeit verbessern.",
         "searchPlaceholder": "Sprachen suchen...",
         "noResults": "Keine Sprachen gefunden",
-        "auto": "Auto"
+        "auto": "Auto",
+        "strictDescription": "Verwende Englisch, Deutsch oder Bulgarisch für die Spracherkennung. Der Modus „Tastaturlayout folgen“ übernimmt beim Start der Aufnahme das aktive Layout.",
+        "followKeyboard": "Tastaturlayout folgen — nur Englisch/Deutsch/Bulgarisch"
       },
       "pushToTalk": {
         "label": "Push-to-Talk",

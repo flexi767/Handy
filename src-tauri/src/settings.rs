@@ -509,7 +509,7 @@ fn default_whats_new_last_seen_version() -> String {
 }
 
 fn default_selected_language() -> String {
-    "auto".to_string()
+    crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE.to_string()
 }
 
 fn default_overlay_position() -> OverlayPosition {
@@ -855,7 +855,7 @@ pub fn get_default_settings() -> AppSettings {
         clamshell_microphone: None,
         selected_output_device: None,
         translate_to_english: false,
-        selected_language: "auto".to_string(),
+        selected_language: default_selected_language(),
         overlay_position: default_overlay_position(),
         debug_mode: false,
         log_level: default_log_level(),
@@ -1026,6 +1026,13 @@ fn apply_settings_migrations(
     settings_value: &serde_json::Value,
 ) -> bool {
     let mut updated = false;
+
+    let normalized_language =
+        crate::keyboard_language::normalize_persisted_language(&settings.selected_language);
+    if settings.selected_language != normalized_language {
+        settings.selected_language = normalized_language.to_string();
+        updated = true;
+    }
 
     // One-time onboarding migration: users with an explicit selected model have
     // already made it through model selection. Users who merely have compatible
@@ -1249,8 +1256,14 @@ mod tests {
         assert_eq!(settings.log_level, LogLevel::Debug);
         assert_eq!(settings.sound_theme, SoundTheme::Pop);
 
-        // A current-format store must not be rewritten on every read.
-        assert!(!apply_settings_migrations(&mut settings, &stored));
+        // The strict-language migration rewrites the legacy base code once.
+        assert!(apply_settings_migrations(&mut settings, &stored));
+        assert_eq!(
+            settings.selected_language,
+            crate::keyboard_language::ENGLISH_LANGUAGE
+        );
+        let migrated_store = serde_json::to_value(&settings).unwrap();
+        assert!(!apply_settings_migrations(&mut settings, &migrated_store));
     }
 
     #[test]
@@ -1352,6 +1365,10 @@ mod tests {
     fn default_settings_disable_auto_submit() {
         let settings = get_default_settings();
         assert!(!settings.auto_submit);
+        assert_eq!(
+            settings.selected_language,
+            crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE
+        );
         assert_eq!(settings.auto_submit_key, AutoSubmitKey::Enter);
         assert_eq!(
             settings.settings_schema_version,

@@ -191,7 +191,9 @@
         "description": "बोली पहचानने के लिए भाषा चुनें. 'ऑटो' अपने आप भाषा पहचान लेता है, जबकि कोई खास भाषा चुनने से उस भाषा की सटीकता बेहतर हो सकती है.",
         "searchPlaceholder": "भाषाएं खोजें...",
         "noResults": "कोई भाषा नहीं मिली",
-        "auto": "ऑटो"
+        "auto": "ऑटो",
+        "strictDescription": "Use English, German, or Bulgarian for speech recognition. Keyboard-following mode snapshots the active layout when recording begins.",
+        "followKeyboard": "Follow Keyboard — English/German/Bulgarian only"
       },
       "pushToTalk": {
         "label": "पुश टू टॉक",

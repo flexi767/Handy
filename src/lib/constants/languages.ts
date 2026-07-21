@@ -4,6 +4,17 @@ export interface Language {
 }
 
 export const CHINESE_LANGUAGE_CODE = "zh";
+export const FOLLOW_KEYBOARD_LANGUAGE = "follow_keyboard";
+
+export const STRICT_TRANSCRIPTION_LANGUAGES: Language[] = [
+  {
+    value: FOLLOW_KEYBOARD_LANGUAGE,
+    label: "Follow Keyboard — English/German/Bulgarian only",
+  },
+  { value: "en-US", label: "English" },
+  { value: "de-DE", label: "German" },
+  { value: "bg-BG", label: "Bulgarian" },
+];
 
 export const LANGUAGES: Language[] = [
   { value: "auto", label: "Auto Detect" },
@@ -114,7 +125,9 @@ export const LANGUAGES: Language[] = [
 const CHINESE_OUTPUT_INTENTS = new Set(["zh-Hans", "zh-Hant"]);
 
 const LANGUAGE_LABELS = new Map(
-  LANGUAGES.map((language) => [language.value, language.label] as const),
+  [...LANGUAGES, ...STRICT_TRANSCRIPTION_LANGUAGES].map(
+    (language) => [language.value, language.label] as const,
+  ),
 );
 
 export const MODEL_CAPABILITY_LANGUAGES: Language[] = LANGUAGES.filter(

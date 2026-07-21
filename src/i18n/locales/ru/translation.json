@@ -209,7 +209,9 @@
         "description": "Выберите язык для распознавания речи. «Авто» автоматически определит язык, а выбор конкретного языка может повысить точность определения этого языка.",
         "searchPlaceholder": "Поиск языков...",
         "noResults": "Языки не найдены",
-        "auto": "Авто"
+        "auto": "Авто",
+        "strictDescription": "Use English, German, or Bulgarian for speech recognition. Keyboard-following mode snapshots the active layout when recording begins.",
+        "followKeyboard": "Follow Keyboard — English/German/Bulgarian only"
       },
       "pushToTalk": {
         "label": "Нажми и говори",

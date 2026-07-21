@@ -233,6 +233,15 @@ pub fn effective_language(
     supported_languages: &[String],
     supports_language_detection: bool,
 ) -> String {
+    // Keyboard-following mode is normally resolved to a concrete locale when
+    // recording starts. Non-recording paths (for example headless file
+    // transcription) use deterministic English rather than unrestricted auto.
+    let intent = if intent == crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE {
+        crate::keyboard_language::ENGLISH_LANGUAGE
+    } else {
+        intent
+    };
+
     if supported_languages.is_empty() {
         return intent.to_string();
     }
@@ -2397,6 +2406,24 @@ mod tests {
         assert_eq!(effective_language("ja", &languages, true), "ja-JP");
         // An unsupported intent still auto-detects when the model can.
         assert_eq!(effective_language("fr", &languages, true), "auto");
+    }
+
+    #[test]
+    fn test_keyboard_following_never_falls_back_to_auto_detection() {
+        let languages = vec![
+            "en-US".to_string(),
+            "de-DE".to_string(),
+            "bg-BG".to_string(),
+        ];
+
+        assert_eq!(
+            effective_language(
+                crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE,
+                &languages,
+                true,
+            ),
+            "en-US"
+        );
     }
 
     #[test]

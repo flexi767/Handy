@@ -191,7 +191,9 @@
         "description": "वाक् पहिचानका लागि भाषा चयन गर्नुहोस्। Auto ले भाषा स्वतः निर्धारण गर्छ, भने कुनै निश्चित भाषा चयन गर्दा त्यस भाषाको शुद्धता सुधार हुन सक्छ।",
         "searchPlaceholder": "भाषाहरू खोज्नुहोस्...",
         "noResults": "कुनै भाषा भेटिएन",
-        "auto": "स्वतः"
+        "auto": "स्वतः",
+        "strictDescription": "Use English, German, or Bulgarian for speech recognition. Keyboard-following mode snapshots the active layout when recording begins.",
+        "followKeyboard": "Follow Keyboard — English/German/Bulgarian only"
       },
       "pushToTalk": {
         "label": "पुश टु टक",

@@ -564,6 +564,11 @@ pub fn change_translate_to_english_setting(app: AppHandle, enabled: bool) -> Res
 #[tauri::command]
 #[specta::specta]
 pub fn change_selected_language_setting(app: AppHandle, language: String) -> Result<(), String> {
+    if !crate::keyboard_language::is_allowed_persisted_language(&language) {
+        return Err(format!(
+            "Unsupported transcription language '{language}'; choose keyboard-following, English, German, or Bulgarian"
+        ));
+    }
     let mut settings = settings::get_settings(&app);
     settings.selected_language = language;
     settings::write_settings(&app, settings);

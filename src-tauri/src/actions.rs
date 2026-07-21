@@ -37,6 +37,9 @@ struct RecordingErrorEvent {
 struct FinishGuard(AppHandle);
 impl Drop for FinishGuard {
     fn drop(&mut self) {
+        if let Some(manager) = self.0.try_state::<Arc<TranscriptionManager>>() {
+            manager.clear_recording_language_snapshot();
+        }
         if let Some(c) = self.0.try_state::<TranscriptionCoordinator>() {
             c.notify_processing_finished();
         }
@@ -400,18 +403,7 @@ pub(crate) struct ProcessedTranscription {
 /// in, without threading a value through the pipeline.
 fn resolve_effective_language(app: &AppHandle, settings: &AppSettings) -> String {
     let tm = app.state::<Arc<TranscriptionManager>>();
-    let model_manager = app.state::<Arc<ModelManager>>();
-    let active_model = tm
-        .get_current_model()
-        .unwrap_or_else(|| settings.selected_model.clone());
-    match model_manager.get_model_info(&active_model) {
-        Some(info) => crate::managers::model::effective_language(
-            &settings.selected_language,
-            &info.supported_languages,
-            info.supports_language_detection,
-        ),
-        None => settings.selected_language.clone(),
-    }
+    tm.effective_language_for_current_model(settings)
 }
 
 pub(crate) async fn process_transcription_output(
@@ -489,6 +481,11 @@ impl ShortcutAction for TranscribeAction {
         let plan_started = Instant::now();
         let settings = get_settings(app);
         let is_always_on = settings.always_on_microphone;
+
+        // Capture the active keyboard source before audio capture begins. The
+        // concrete language stays fixed through streaming, batch inference,
+        // and post-processing even if the user changes layouts mid-recording.
+        tm.snapshot_recording_language(&settings.selected_language);
 
         let selected_model_info = app
             .state::<Arc<ModelManager>>()
@@ -584,6 +581,7 @@ impl ShortcutAction for TranscribeAction {
             // Starting failed (for example due to blocked microphone permissions).
             // Revert UI state so we don't stay stuck in the recording overlay.
             tm.cancel_stream();
+            tm.clear_recording_language_snapshot();
             utils::hide_recording_overlay(app);
             change_tray_icon(app, TrayIconState::Idle);
             if let Some(err) = recording_error {

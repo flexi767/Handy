@@ -1,12 +1,18 @@
-import React, { useState, useRef, useEffect, useMemo } from "react";
+import React, {
+  useState,
+  useRef,
+  useEffect,
+  useMemo,
+  useCallback,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { SettingContainer } from "../ui/SettingContainer";
 import { ResetButton } from "../ui/ResetButton";
 import { useSettings } from "../../hooks/useSettings";
 import {
   getLanguageLabel,
-  recognitionLanguage,
-  SELECTABLE_LANGUAGES,
+  FOLLOW_KEYBOARD_LANGUAGE,
+  STRICT_TRANSCRIPTION_LANGUAGES,
   supportsLanguageCode,
 } from "../../lib/constants/languages";
 
@@ -14,35 +20,26 @@ interface LanguageSelectorProps {
   descriptionMode?: "inline" | "tooltip";
   grouped?: boolean;
   supportedLanguages?: string[];
-  // Whether the model can auto-detect language. Gates the "Auto" option:
-  // must-pick models (no detection) omit it and force a concrete choice.
+  // Retained in the component contract because model settings already provide
+  // this capability. Strict mode never exposes unrestricted auto-detection.
   supportsLanguageDetection?: boolean;
 }
 
-// Mirrors the matching logic of `effective_language` in
-// src-tauri/src/managers/model.rs. The Rust function is authoritative for the
-// *concrete* code the engine receives (e.g. "en-US"); this resolves the
-// canonical *base* code ("en") so the highlighted picker item matches an entry
-// in the LANGUAGES list. Matching is base-aware (`supportsLanguageCode` strips
-// region/script subtags), so a model advertising full locales still resolves.
-const effectiveLanguage = (
-  intent: string,
-  supported: string[],
-  supportsDetection: boolean,
-): string => {
+const effectiveLanguage = (intent: string, supported: string[]): string => {
+  if (intent === FOLLOW_KEYBOARD_LANGUAGE) return intent;
   if (supported.length === 0) return intent;
   if (intent !== "auto" && supportsLanguageCode(supported, intent))
     return intent;
-  if (supportsDetection) return "auto";
-  if (supportsLanguageCode(supported, "en")) return "en";
-  return recognitionLanguage(supported[0]);
+  if (supportsLanguageCode(supported, "en-US")) return "en-US";
+  if (supportsLanguageCode(supported, "de-DE")) return "de-DE";
+  if (supportsLanguageCode(supported, "bg-BG")) return "bg-BG";
+  return FOLLOW_KEYBOARD_LANGUAGE;
 };
 
 export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
   descriptionMode = "tooltip",
   grouped = false,
   supportedLanguages,
-  supportsLanguageDetection = true,
 }) => {
   const { t } = useTranslation();
   const { getSetting, updateSetting, resetSetting, isUpdating } = useSettings();
@@ -51,14 +48,8 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  // The persisted *intent* (auto | code). What's actually used/shown is the
-  // effective value resolved against the current model's capabilities.
-  const intent = getSetting("selected_language") || "auto";
-  const selectedLanguage = effectiveLanguage(
-    intent,
-    supportedLanguages ?? [],
-    supportsLanguageDetection,
-  );
+  const intent = getSetting("selected_language") || FOLLOW_KEYBOARD_LANGUAGE;
+  const selectedLanguage = effectiveLanguage(intent, supportedLanguages ?? []);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -85,24 +76,36 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
 
   const availableLanguages = useMemo(() => {
     if (!supportedLanguages || supportedLanguages.length === 0)
-      return SELECTABLE_LANGUAGES;
-    return SELECTABLE_LANGUAGES.filter((lang) =>
-      lang.value === "auto"
-        ? supportsLanguageDetection
-        : supportsLanguageCode(supportedLanguages, lang.value),
+      return STRICT_TRANSCRIPTION_LANGUAGES;
+    return STRICT_TRANSCRIPTION_LANGUAGES.filter(
+      (language) =>
+        language.value === FOLLOW_KEYBOARD_LANGUAGE ||
+        supportsLanguageCode(supportedLanguages, language.value),
     );
-  }, [supportedLanguages, supportsLanguageDetection]);
+  }, [supportedLanguages]);
+
+  const languageLabel = useCallback(
+    (language: { value: string; label: string }) =>
+      language.value === FOLLOW_KEYBOARD_LANGUAGE
+        ? t("settings.general.language.followKeyboard")
+        : language.label,
+    [t],
+  );
 
   const filteredLanguages = useMemo(
     () =>
       availableLanguages.filter((language) =>
-        language.label.toLowerCase().includes(searchQuery.toLowerCase()),
+        languageLabel(language)
+          .toLowerCase()
+          .includes(searchQuery.toLowerCase()),
       ),
-    [searchQuery, availableLanguages],
+    [searchQuery, availableLanguages, languageLabel],
   );
 
   const selectedLanguageName =
-    getLanguageLabel(selectedLanguage) || t("settings.general.language.auto");
+    selectedLanguage === FOLLOW_KEYBOARD_LANGUAGE
+      ? t("settings.general.language.followKeyboard")
+      : getLanguageLabel(selectedLanguage) || selectedLanguage;
 
   const handleLanguageSelect = async (languageCode: string) => {
     await updateSetting("selected_language", languageCode);
@@ -136,7 +139,7 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
   return (
     <SettingContainer
       title={t("settings.general.language.title")}
-      description={t("settings.general.language.description")}
+      description={t("settings.general.language.strictDescription")}
       descriptionMode={descriptionMode}
       grouped={grouped}
     >
@@ -203,7 +206,9 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
                       onClick={() => handleLanguageSelect(language.value)}
                     >
                       <div className="flex items-center justify-between">
-                        <span className="truncate">{language.label}</span>
+                        <span className="truncate">
+                          {languageLabel(language)}
+                        </span>
                       </div>
                     </button>
                   ))

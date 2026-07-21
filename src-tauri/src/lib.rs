@@ -9,6 +9,7 @@ mod clipboard;
 mod commands;
 mod helpers;
 mod input;
+mod keyboard_language;
 mod llm_client;
 mod managers;
 mod overlay;
