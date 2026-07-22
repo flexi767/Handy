@@ -2576,6 +2576,12 @@ mod tests {
             "This is not Bulgarian.",
             "bg-BG"
         ));
+        // Saved Parakeet regression: Bulgarian speech was rendered as a
+        // synthetic Latin transliteration instead of Bulgarian Cyrillic.
+        assert!(!transcription_script_matches_language(
+            "Št je svârsza spokojna.",
+            "bg"
+        ));
     }
 
     #[test]

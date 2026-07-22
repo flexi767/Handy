@@ -116,6 +116,23 @@ During implementation, a recording that had previously failed because Handy
 passed unsupported `en-US` to Parakeet was replayed through the installed app.
 The corrected run passed `en` and returned a transcript successfully.
 
+### Saved regression: Latinized Bulgarian output
+
+Keep the exact Parakeet output `Št je svârsza spokojna.` as a future end-to-end
+test case for Bulgarian Follow Keyboard dictation. Apple Natural Language
+classifies the complete text as Croatian with about 92.5% confidence and the
+span `svârsza spokojna` as Polish with about 98.2% confidence. The mixture of
+`Š`, `â`, and `sz` is not Bulgarian orthography; Bulgarian should use Cyrillic.
+
+The script validator correctly rejects this output for `bg`. The outstanding
+routing gap is that wrong-script output advances through the other installed
+keyboard languages, while the forced-language Nemotron fallback currently runs
+only for a same-script alphabet or lexical-language conflict. If every keyboard
+retry fails, the fail-open behavior preserves the first non-empty Parakeet
+result. A future end-to-end regression should verify that retained audio is
+instead retried through Nemotron with Bulgarian forced before that result can be
+returned.
+
 ## macOS language-metadata mapping
 
 The general input-source mapper reads `kTISPropertyInputSourceLanguages` from each
