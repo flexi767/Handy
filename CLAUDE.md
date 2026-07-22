@@ -207,6 +207,20 @@ Access debug features: `Cmd+Shift+D` (macOS) or `Ctrl+Shift+D` (Windows/Linux)
 - **Windows**: Vulkan acceleration, code signing
 - **Linux**: OpenBLAS + Vulkan, limited Wayland support, overlay uses GTK layer shell (disable with `HANDY_NO_GTK_LAYER_SHELL=1`)
 
+## Local macOS signing config (fork-only)
+
+**`src-tauri/tauri.conf.json` must keep `"signingIdentity": "-"`.** It is the
+shared config owned by upstream; a real identity there breaks the build for every
+other contributor and leaks into any PR diff that touches the file.
+
+All local signing settings belong in `src-tauri/tauri.local.conf.json`, which
+`scripts/build-install-macos.sh` passes via `tauri build --config`. Tauri merges
+that file over the base config, so it only needs the keys that differ
+(`signingIdentity`, `entitlements`, `minimumSystemVersion`) and inherits the rest.
+
+Never "fix" a signing failure by editing `tauri.conf.json`; edit the local config
+or the build script instead.
+
 ## Troubleshooting
 
 See the [Troubleshooting](README.md#troubleshooting) section in README.md.
