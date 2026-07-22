@@ -1,12 +1,12 @@
-//! Strict transcription-language selection for the local three-language setup.
+//! Transcription-language selection that can follow the active keyboard layout.
 
 use log::{debug, warn};
 use std::collections::HashSet;
 
 pub const FOLLOW_KEYBOARD_LANGUAGE: &str = "follow_keyboard";
+pub const AUTO_LANGUAGE: &str = "auto";
+/// Fallback locale used when no keyboard layout maps to a usable language.
 pub const ENGLISH_LANGUAGE: &str = "en-US";
-pub const GERMAN_LANGUAGE: &str = "de-DE";
-pub const BULGARIAN_LANGUAGE: &str = "bg-BG";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct KeyboardInputSource {
@@ -37,29 +37,29 @@ impl KeyboardInputSource {
     }
 }
 
+/// Keyboard-following mode, automatic detection, and any well-formed BCP-47 tag
+/// are all valid persisted choices.
 pub fn is_allowed_persisted_language(language: &str) -> bool {
-    matches!(
-        language,
-        FOLLOW_KEYBOARD_LANGUAGE | ENGLISH_LANGUAGE | GERMAN_LANGUAGE | BULGARIAN_LANGUAGE
-    )
+    matches!(language, FOLLOW_KEYBOARD_LANGUAGE | AUTO_LANGUAGE)
+        || canonicalize_bcp47(language).is_some()
 }
 
-/// Fold legacy settings into the strict language set. Unknown values, including
-/// the old unrestricted `auto`, become keyboard-following mode.
-pub fn normalize_persisted_language(language: &str) -> &'static str {
+/// Normalize a persisted language for use. Keyboard-following mode and
+/// automatic detection pass through untouched, explicit locales are
+/// canonicalized, and only genuinely malformed values fall back to automatic
+/// detection.
+pub fn normalize_persisted_language(language: &str) -> String {
     match language {
-        FOLLOW_KEYBOARD_LANGUAGE => FOLLOW_KEYBOARD_LANGUAGE,
-        "en" | ENGLISH_LANGUAGE => ENGLISH_LANGUAGE,
-        "de" | GERMAN_LANGUAGE => GERMAN_LANGUAGE,
-        "bg" | BULGARIAN_LANGUAGE => BULGARIAN_LANGUAGE,
-        _ => FOLLOW_KEYBOARD_LANGUAGE,
+        FOLLOW_KEYBOARD_LANGUAGE => FOLLOW_KEYBOARD_LANGUAGE.to_string(),
+        AUTO_LANGUAGE => AUTO_LANGUAGE.to_string(),
+        other => canonicalize_bcp47(other).unwrap_or_else(|| AUTO_LANGUAGE.to_string()),
     }
 }
 
 /// Resolve and freeze the language to use for one recording.
 pub fn language_for_recording(persisted_language: &str) -> String {
     if persisted_language != FOLLOW_KEYBOARD_LANGUAGE {
-        return normalize_persisted_language(persisted_language).to_string();
+        return normalize_persisted_language(persisted_language);
     }
 
     match current_keyboard_input_source()
@@ -398,7 +398,7 @@ mod tests {
         );
         assert_eq!(
             language_for_input_source(&KeyboardInputSource::test("anything", &["bg-BG"])),
-            Some(BULGARIAN_LANGUAGE.to_string())
+            Some("bg-BG".to_string())
         );
         assert_eq!(
             language_for_input_source(&KeyboardInputSource::test("anything", &["fr-FR"])),
@@ -435,16 +435,32 @@ mod tests {
     }
 
     #[test]
-    fn keeps_explicit_settings_strict_but_keyboard_metadata_general() {
+    fn normalization_preserves_every_valid_persisted_choice() {
+        // Automatic detection and keyboard-following mode are both first-class
+        // choices and must survive a settings load untouched.
+        assert_eq!(normalize_persisted_language(AUTO_LANGUAGE), AUTO_LANGUAGE);
         assert_eq!(
-            normalize_persisted_language("auto"),
+            normalize_persisted_language(FOLLOW_KEYBOARD_LANGUAGE),
             FOLLOW_KEYBOARD_LANGUAGE
         );
-        assert_eq!(normalize_persisted_language("fr"), FOLLOW_KEYBOARD_LANGUAGE);
-        assert_eq!(
-            language_for_input_source(&KeyboardInputSource::test("French", &["fr"])),
-            Some("fr".to_string())
-        );
+
+        // An explicit language the user picked is never rewritten, whether it is
+        // a bare code or a full locale.
+        assert_eq!(normalize_persisted_language("fr"), "fr");
+        assert_eq!(normalize_persisted_language("es"), "es");
+        assert_eq!(normalize_persisted_language("bg-BG"), "bg-BG");
+        assert_eq!(normalize_persisted_language("zh-Hans"), "zh-Hans");
+        assert_eq!(normalize_persisted_language("en_US"), "en-US");
+
+        // Only genuinely malformed values fall back, and they fall back to
+        // automatic detection rather than to keyboard-following mode.
+        assert_eq!(normalize_persisted_language(""), AUTO_LANGUAGE);
+        assert_eq!(normalize_persisted_language("!!"), AUTO_LANGUAGE);
+
+        assert!(is_allowed_persisted_language(AUTO_LANGUAGE));
+        assert!(is_allowed_persisted_language(FOLLOW_KEYBOARD_LANGUAGE));
+        assert!(is_allowed_persisted_language("es"));
+        assert!(!is_allowed_persisted_language("!!"));
     }
 
     #[test]
@@ -458,17 +474,14 @@ mod tests {
         ];
 
         assert_eq!(
-            ordered_language_candidates(GERMAN_LANGUAGE, sources.iter()),
-            vec![GERMAN_LANGUAGE, "fr", "en", "bg"]
+            ordered_language_candidates("de-DE", sources.iter()),
+            vec!["de-DE", "fr", "en", "bg"]
         );
     }
 
     #[test]
     fn explicit_language_has_no_retry_candidates() {
-        assert_eq!(
-            language_candidates_for_recording(BULGARIAN_LANGUAGE),
-            vec![BULGARIAN_LANGUAGE]
-        );
+        assert_eq!(language_candidates_for_recording("bg-BG"), vec!["bg-BG"]);
     }
 
     #[test]

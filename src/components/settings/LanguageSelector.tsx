@@ -11,8 +11,10 @@ import { ResetButton } from "../ui/ResetButton";
 import { useSettings } from "../../hooks/useSettings";
 import {
   getLanguageLabel,
+  recognitionLanguage,
   FOLLOW_KEYBOARD_LANGUAGE,
-  STRICT_TRANSCRIPTION_LANGUAGES,
+  FOLLOW_KEYBOARD_LANGUAGE_OPTION,
+  SELECTABLE_LANGUAGES,
   supportsLanguageCode,
 } from "../../lib/constants/languages";
 
@@ -20,26 +22,38 @@ interface LanguageSelectorProps {
   descriptionMode?: "inline" | "tooltip";
   grouped?: boolean;
   supportedLanguages?: string[];
-  // Retained in the component contract because model settings already provide
-  // this capability. Strict mode never exposes unrestricted auto-detection.
+  // Whether the model can auto-detect language. Gates the "Auto" option:
+  // must-pick models (no detection) omit it and force a concrete choice.
   supportsLanguageDetection?: boolean;
 }
 
-const effectiveLanguage = (intent: string, supported: string[]): string => {
+// Mirrors the matching logic of `effective_language` in
+// src-tauri/src/managers/model.rs. The Rust function is authoritative for the
+// *concrete* code the engine receives (e.g. "en-US"); this resolves the
+// canonical *base* code ("en") so the highlighted picker item matches an entry
+// in the LANGUAGES list. Matching is base-aware (`supportsLanguageCode` strips
+// region/script subtags), so a model advertising full locales still resolves.
+const effectiveLanguage = (
+  intent: string,
+  supported: string[],
+  supportsDetection: boolean,
+): string => {
+  // Keyboard-following mode resolves to a concrete locale only when recording
+  // starts, so it always displays as itself.
   if (intent === FOLLOW_KEYBOARD_LANGUAGE) return intent;
   if (supported.length === 0) return intent;
   if (intent !== "auto" && supportsLanguageCode(supported, intent))
     return intent;
-  if (supportsLanguageCode(supported, "en-US")) return "en-US";
-  if (supportsLanguageCode(supported, "de-DE")) return "de-DE";
-  if (supportsLanguageCode(supported, "bg-BG")) return "bg-BG";
-  return FOLLOW_KEYBOARD_LANGUAGE;
+  if (supportsDetection) return "auto";
+  if (supportsLanguageCode(supported, "en")) return "en";
+  return recognitionLanguage(supported[0]);
 };
 
 export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
   descriptionMode = "tooltip",
   grouped = false,
   supportedLanguages,
+  supportsLanguageDetection = true,
 }) => {
   const { t } = useTranslation();
   const { getSetting, updateSetting, resetSetting, isUpdating } = useSettings();
@@ -48,8 +62,15 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
   const dropdownRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  const intent = getSetting("selected_language") || FOLLOW_KEYBOARD_LANGUAGE;
-  const selectedLanguage = effectiveLanguage(intent, supportedLanguages ?? []);
+  // The persisted *intent* (follow_keyboard | auto | code). What's actually
+  // used/shown is the effective value resolved against the current model's
+  // capabilities.
+  const intent = getSetting("selected_language") || "auto";
+  const selectedLanguage = effectiveLanguage(
+    intent,
+    supportedLanguages ?? [],
+    supportsLanguageDetection,
+  );
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -74,15 +95,20 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
     }
   }, [isOpen]);
 
+  // Keyboard-following mode is always offered: it resolves to a concrete locale
+  // when recording starts, and the backend falls back if the model can't serve
+  // that locale.
   const availableLanguages = useMemo(() => {
-    if (!supportedLanguages || supportedLanguages.length === 0)
-      return STRICT_TRANSCRIPTION_LANGUAGES;
-    return STRICT_TRANSCRIPTION_LANGUAGES.filter(
-      (language) =>
-        language.value === FOLLOW_KEYBOARD_LANGUAGE ||
-        supportsLanguageCode(supportedLanguages, language.value),
-    );
-  }, [supportedLanguages]);
+    const selectable =
+      !supportedLanguages || supportedLanguages.length === 0
+        ? SELECTABLE_LANGUAGES
+        : SELECTABLE_LANGUAGES.filter((language) =>
+            language.value === "auto"
+              ? supportsLanguageDetection
+              : supportsLanguageCode(supportedLanguages, language.value),
+          );
+    return [FOLLOW_KEYBOARD_LANGUAGE_OPTION, ...selectable];
+  }, [supportedLanguages, supportsLanguageDetection]);
 
   const languageLabel = useCallback(
     (language: { value: string; label: string }) =>

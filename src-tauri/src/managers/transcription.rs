@@ -411,7 +411,6 @@ impl TranscriptionManager {
             .cloned()
             .unwrap_or_else(|| {
                 crate::keyboard_language::normalize_persisted_language(persisted_language)
-                    .to_string()
             })
     }
 
@@ -422,10 +421,9 @@ impl TranscriptionManager {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
         if languages.is_empty() {
-            vec![
-                crate::keyboard_language::normalize_persisted_language(persisted_language)
-                    .to_string(),
-            ]
+            vec![crate::keyboard_language::normalize_persisted_language(
+                persisted_language,
+            )]
         } else {
             languages
         }

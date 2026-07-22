@@ -1030,7 +1030,7 @@ fn apply_settings_migrations(
     let normalized_language =
         crate::keyboard_language::normalize_persisted_language(&settings.selected_language);
     if settings.selected_language != normalized_language {
-        settings.selected_language = normalized_language.to_string();
+        settings.selected_language = normalized_language;
         updated = true;
     }
 
@@ -1256,14 +1256,10 @@ mod tests {
         assert_eq!(settings.log_level, LogLevel::Debug);
         assert_eq!(settings.sound_theme, SoundTheme::Pop);
 
-        // The strict-language migration rewrites the legacy base code once.
-        assert!(apply_settings_migrations(&mut settings, &stored));
-        assert_eq!(
-            settings.selected_language,
-            crate::keyboard_language::ENGLISH_LANGUAGE
-        );
-        let migrated_store = serde_json::to_value(&settings).unwrap();
-        assert!(!apply_settings_migrations(&mut settings, &migrated_store));
+        // A language stored before keyboard-following mode existed is still a
+        // valid choice: loading it must not silently rewrite the user's setting.
+        assert!(!apply_settings_migrations(&mut settings, &stored));
+        assert_eq!(settings.selected_language, "en");
     }
 
     #[test]

@@ -188,7 +188,7 @@
       },
       "language": {
         "title": "Language",
-        "description": "Use English, German, or Bulgarian for speech recognition. Keyboard-following mode snapshots the active layout when recording begins.",
+        "description": "Select the language for speech recognition. Auto will automatically determine the language, while selecting a specific language can improve accuracy for that language.",
         "keyboardDescription": "Uses the language associated with the active keyboard layout when recording begins.",
         "searchPlaceholder": "Search languages...",
         "noResults": "No languages found",
