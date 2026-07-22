@@ -63,6 +63,11 @@ exercise continuation past an empty first candidate into a later language.
 
 ## Boundaries and future work
 
+- Mixed-language output is valid. The invariant is that each substantial span
+  must be explainable by an enabled language; the transcript is not required to
+  use only one language or script. Isolated low-confidence foreign tokens and
+  brand names such as `OpenAI тест` remain allowed. A confident multi-word span
+  in an unsupported language remains a recovery signal.
 - Text-language span recognition currently uses Apple's offline Natural
   Language framework; other platforms retain script and alphabet validation.
 - Very short same-script utterances may be ambiguous and intentionally prefer

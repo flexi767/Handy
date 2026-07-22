@@ -2735,6 +2735,15 @@ mod tests {
     }
 
     #[test]
+    fn mixed_language_validation_allows_isolated_brand_names() {
+        assert!(transcription_matches_language("OpenAI тест", "bg"));
+        assert!(transcription_matches_language(
+            "OpenAI тест на български.",
+            "bg-BG"
+        ));
+    }
+
+    #[test]
     fn language_conflict_decision_is_bcp47_general_and_conservative() {
         assert!(language_hypothesis_is_conflicting("bg-BG", "ru", 0.992));
         assert!(!language_hypothesis_is_conflicting("bg", "bg-BG", 1.0));
