@@ -1488,23 +1488,26 @@ impl TranscriptionManager {
                                         &text,
                                         attempt_language,
                                     );
-                                if script_matches && characters_match {
+                                let language_spans_match = settings.selected_language
+                                    != crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE
+                                    || !transcription_contains_conflicting_language_span(
+                                        &text,
+                                        attempt_language,
+                                    );
+                                if script_matches && characters_match && language_spans_match {
                                     return Ok(text);
                                 }
 
-                                // A same-script alphabet mismatch (for example Ukrainian
-                                // `і` in a Bulgarian result) cannot be corrected by
-                                // Parakeet V3's auto-language decoder. Retry the retained
-                                // audio once with the downloaded prompt-conditioned
-                                // Nemotron model, while keeping Parakeet as the selected
-                                // and cached primary model.
+                                // Same-script alphabet or lexical-language leakage cannot
+                                // be corrected by Parakeet V3's auto-language decoder.
+                                // Retry retained audio with the prompt-conditioned model.
                                 if attempt_index == 0
                                     && active_model.contains("parakeet-tdt-0.6b-v3")
                                     && script_matches
-                                    && !characters_match
+                                    && (!characters_match || !language_spans_match)
                                 {
                                     warn!(
-                                        "Transcript for '{}' contained letters outside the locale exemplar set; trying retained audio with Nemotron fallback",
+                                        "Transcript for '{}' conflicted with its locale alphabet or text language; trying retained audio with Nemotron fallback",
                                         attempt_language
                                     );
                                     if let Some(fallback_text) = self
@@ -1518,17 +1521,20 @@ impl TranscriptionManager {
                                             &settings,
                                             false,
                                         );
-                                        let fallback_matches = transcription_script_matches_language(
-                                            &fallback_text,
-                                            attempt_language,
-                                        )
-                                            && transcription_characters_match_language(
+                                        let fallback_matches =
+                                            transcription_script_matches_language(
+                                                &fallback_text,
+                                                attempt_language,
+                                            ) && transcription_characters_match_language(
+                                                &fallback_text,
+                                                attempt_language,
+                                            ) && !transcription_contains_conflicting_language_span(
                                                 &fallback_text,
                                                 attempt_language,
                                             );
                                         if fallback_is_usable && fallback_matches {
                                             info!(
-                                                "Using Nemotron fallback transcript for '{}' after locale alphabet validation",
+                                                "Using Nemotron fallback transcript for '{}' after locale and text-language validation",
                                                 attempt_language
                                             );
                                             return Ok(fallback_text);
@@ -1541,7 +1547,7 @@ impl TranscriptionManager {
                                 }
 
                                 warn!(
-                                    "Transcript for '{}' did not match the expected writing system or locale alphabet; rejecting it before keyboard-language retry",
+                                    "Transcript for '{}' did not match the expected writing system, locale alphabet, or text language; rejecting it before keyboard-language retry",
                                     attempt_language
                                 );
                                 if let Some(next_language) =
@@ -2079,6 +2085,71 @@ fn transcription_characters_match_language(raw: &str, language: &str) -> bool {
         })
 }
 
+fn primary_language_subtag(language: &str) -> Option<String> {
+    language
+        .trim()
+        .split(['-', '_'])
+        .next()
+        .filter(|subtag| !subtag.is_empty())
+        .map(str::to_ascii_lowercase)
+}
+
+fn language_hypothesis_is_conflicting(
+    expected_language: &str,
+    detected_language: &str,
+    confidence: f64,
+) -> bool {
+    const MIN_CONFLICT_CONFIDENCE: f64 = 0.9;
+
+    confidence >= MIN_CONFLICT_CONFIDENCE
+        && primary_language_subtag(expected_language).is_some_and(|expected| {
+            primary_language_subtag(detected_language).is_some_and(|detected| detected != expected)
+        })
+}
+
+/// Detect a confidently foreign two-word span in an otherwise script-compatible
+/// transcript. Whole-sentence recognition can hide a short mixed-language
+/// hallucination, while one-word recognition is too noisy for names.
+#[cfg(target_os = "macos")]
+fn transcription_contains_conflicting_language_span(raw: &str, language: &str) -> bool {
+    use objc2::rc::autoreleasepool;
+    use objc2_foundation::NSString;
+    use objc2_natural_language::NLLanguageRecognizer;
+
+    let words = raw
+        .split(|character: char| !character.is_alphabetic())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>();
+    if words.len() < 2 || primary_language_subtag(language).is_none() {
+        return false;
+    }
+
+    autoreleasepool(|_| {
+        words.windows(2).any(|window| {
+            let text = NSString::from_str(&window.join(" "));
+            let recognizer = unsafe { NLLanguageRecognizer::new() };
+            unsafe { recognizer.processString(&text) };
+            let hypotheses = unsafe { recognizer.languageHypothesesWithMaximum(1) };
+            let (languages, confidences) = hypotheses.to_vecs();
+            languages
+                .first()
+                .zip(confidences.first())
+                .is_some_and(|(detected, confidence)| {
+                    language_hypothesis_is_conflicting(
+                        language,
+                        &detected.to_string(),
+                        confidence.doubleValue(),
+                    )
+                })
+        })
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn transcription_contains_conflicting_language_span(_raw: &str, _language: &str) -> bool {
+    false
+}
+
 /// Optional text cleanup must never discard a successful model result. The
 /// transform is pure and owns its input, so recovering the untouched text is
 /// safe even if a bug in custom-word or filler filtering unwinds.
@@ -2551,6 +2622,31 @@ mod tests {
         assert!(transcription_characters_match_language(
             "text",
             "not_a_locale"
+        ));
+    }
+
+    #[test]
+    fn language_conflict_decision_is_bcp47_general_and_conservative() {
+        assert!(language_hypothesis_is_conflicting("bg-BG", "ru", 0.992));
+        assert!(!language_hypothesis_is_conflicting("bg", "bg-BG", 1.0));
+        assert!(!language_hypothesis_is_conflicting("de-DE", "da", 0.899));
+        assert!(!language_hypothesis_is_conflicting("", "ru", 1.0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_language_spans_catch_mixed_parakeet_output() {
+        assert!(transcription_contains_conflicting_language_span(
+            "Сега срещу вороно Богорский.",
+            "bg-BG"
+        ));
+        assert!(!transcription_contains_conflicting_language_span(
+            "Сега също говоря на български.",
+            "bg"
+        ));
+        assert!(!transcription_contains_conflicting_language_span(
+            "Сега също говоре на български.",
+            "bg"
         ));
     }
 

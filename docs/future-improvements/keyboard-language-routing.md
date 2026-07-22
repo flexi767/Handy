@@ -78,14 +78,23 @@ Ukrainian `і` in a Bulgarian result) mark the transcript as suspicious. Letters
 from another script, such as `OpenAI` in Bulgarian text, do not trigger this
 alphabet-level check.
 
-When the first attempt has the expected script but fails the alphabet check,
-Handy loads the downloaded prompt-conditioned Nemotron 3.5 Q8 GGUF as a
-one-shot fallback and retranscribes the retained in-memory audio with the exact
-model locale (`bg-BG`, `de-DE`, and so on). Parakeet remains the selected and
-cached primary model. A usable Nemotron result is accepted only when it passes
-both script and alphabet validation. If the fallback model is missing, fails,
-or returns another suspicious result, Handy preserves the original Parakeet
-text rather than discarding the dictation.
+On macOS, Handy also checks overlapping two-word spans with Apple's offline
+Natural Language framework. This catches confidently mixed same-alphabet text
+that a whole-sentence classifier can hide, such as a Bulgarian transcript with
+a two-word Russian hallucination. A different language must exceed 90%
+confidence; single words are deliberately ignored because names and short words
+are noisy. The comparison uses BCP-47 primary subtags rather than a hard-coded
+language list. Other platforms fail open until an equivalent system detector is
+available.
+
+When the first attempt has the expected script but fails the alphabet or text
+language check, Handy loads the downloaded prompt-conditioned Nemotron 3.5 Q8
+GGUF as a one-shot fallback and retranscribes the retained in-memory audio with
+the exact model locale (`bg-BG`, `de-DE`, and so on). Parakeet remains the
+selected and cached primary model. A usable Nemotron result is accepted only
+when it passes script, alphabet, and text-language validation. If the fallback
+model is missing, fails, or returns another suspicious result, Handy preserves
+the original Parakeet text rather than discarding the dictation.
 
 ### Tests and runtime verification
 
@@ -99,7 +108,9 @@ The implementation is covered by tests for:
 - CLDR/Unicode script compatibility, including explicit script subtags and
   fail-open behavior for script-neutral or composite-script text; and
 - CLDR exemplar-set validation for same-script leakage, auxiliary characters,
-  and embedded foreign-script names.
+  and embedded foreign-script names; and
+- conservative BCP-47 text-language mismatch decisions plus the exact mixed
+  Bulgarian/Russian Parakeet regression on macOS.
 
 During implementation, a recording that had previously failed because Handy
 passed unsupported `en-US` to Parakeet was replayed through the installed app.
