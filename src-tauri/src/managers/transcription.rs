@@ -1178,15 +1178,17 @@ impl TranscriptionManager {
         .emit(&self.app_handle);
     }
 
-    /// Retry retained audio with the downloaded prompt-conditioned Nemotron
-    /// model without replacing the user's selected/cached primary engine.
-    /// Missing models and inference failures fail open so the caller can retain
-    /// the original transcript.
-    fn transcribe_with_nemotron_language_fallback(
+    /// Wrong-keyboard recovery: load the downloaded prompt-conditioned
+    /// Nemotron model once, then retry retained audio with each installed
+    /// keyboard language forced. The selected/cached Parakeet engine remains
+    /// untouched. Missing models, invalid transcripts, and inference failures
+    /// advance to the next candidate and ultimately fail open.
+    fn recover_wrong_keyboard_language_with_nemotron(
         &self,
         audio: &[f32],
-        language: &str,
-    ) -> Option<String> {
+        languages: &[String],
+        settings: &AppSettings,
+    ) -> Option<(String, String)> {
         let model_info = self
             .model_manager
             .get_model_info(NEMOTRON_LANGUAGE_FALLBACK_MODEL_ID)?;
@@ -1209,7 +1211,6 @@ impl TranscriptionManager {
                 return None;
             }
         };
-        let settings = get_settings(&self.app_handle);
         let accelerator = settings.transcribe_accelerator;
         let options = ModelOptions {
             backend: select_transcribe_backend(accelerator),
@@ -1230,30 +1231,147 @@ impl TranscriptionManager {
             }
         };
         let caps = session.model().capabilities();
-        let run_plan = transcribe_cpp_run_plan(false, language, &caps.languages, false);
-        let Some(language) = run_plan.language else {
-            warn!(
-                "Nemotron fallback does not advertise the requested language '{}'",
+        for language_intent in languages {
+            let run_plan = transcribe_cpp_run_plan(false, language_intent, &caps.languages, false);
+            let Some(language) = run_plan.language else {
+                warn!(
+                    "Wrong-keyboard recovery skipped '{}' because Nemotron does not advertise it",
+                    language_intent
+                );
+                continue;
+            };
+            let run_options = RunOptions {
+                task: run_plan.task,
+                language: Some(language.clone()),
+                target_language: run_plan.target_language,
+                ..Default::default()
+            };
+            info!(
+                "Wrong-keyboard recovery is running retained audio through Nemotron with language '{}'",
                 language
             );
-            return None;
-        };
+            let fallback_text = match session.run(audio, &run_options) {
+                Ok(transcription) => transcription.text,
+                Err(error) => {
+                    warn!(
+                        "Wrong-keyboard Nemotron attempt for '{}' failed: {}",
+                        language_intent, error
+                    );
+                    continue;
+                }
+            };
+            let fallback_is_usable =
+                transcription_result_is_usable(&fallback_text, settings, false);
+            let fallback_matches = transcription_matches_language(&fallback_text, language_intent);
+            if fallback_is_usable && fallback_matches {
+                info!(
+                    "Wrong-keyboard recovery accepted Nemotron transcript for '{}'",
+                    language_intent
+                );
+                return Some((fallback_text, language_intent.clone()));
+            }
+            warn!(
+                "Wrong-keyboard Nemotron transcript for '{}' was empty or failed language validation",
+                language_intent
+            );
+        }
+
+        None
+    }
+
+    /// Separate Follow Keyboard feature for speech that does not match the
+    /// active input source. Parakeet V3 performs automatic language detection,
+    /// so running it repeatedly with different language options only repeats
+    /// the same decoding. Run it once, validate that transcript against the
+    /// installed keyboard languages, then use prompt-conditioned Nemotron for
+    /// genuinely forced per-language recovery.
+    fn transcribe_parakeet_with_wrong_keyboard_recovery(
+        &self,
+        session: &mut Session,
+        audio: &[f32],
+        languages: &[String],
+        settings: &AppSettings,
+        model_languages: &[String],
+        model_supports_translate: bool,
+    ) -> Result<String> {
+        let primary_language = languages
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("Wrong-keyboard recovery has no language candidates"))?;
+        let run_plan = transcribe_cpp_run_plan(
+            settings.translate_to_english,
+            primary_language,
+            model_languages,
+            model_supports_translate,
+        );
         let run_options = RunOptions {
             task: run_plan.task,
-            language: Some(language.clone()),
+            language: run_plan.language,
             target_language: run_plan.target_language,
             ..Default::default()
         };
-        info!(
-            "Running retained audio through Nemotron fallback with language '{}'",
-            language
+        debug!(
+            "Parakeet primary run for wrong-keyboard recovery: task={:?}, language={:?}",
+            run_options.task, run_options.language
         );
-        match session.run(audio, &run_options) {
-            Ok(transcription) => Some(transcription.text),
-            Err(error) => {
-                warn!("Nemotron language fallback failed: {}", error);
-                None
+
+        let primary_result = session.run(audio, &run_options);
+        let mut primary_text = String::new();
+        let mut primary_error = None;
+        match primary_result {
+            Ok(transcription) => {
+                primary_text = transcription.text;
+                if transcription_result_is_usable(&primary_text, settings, false) {
+                    if let Some(matched_language) =
+                        matching_transcript_language(&primary_text, languages)
+                    {
+                        if matched_language != primary_language {
+                            info!(
+                                "Wrong-keyboard recovery matched the Parakeet transcript to installed language '{}' instead of active keyboard language '{}'",
+                                matched_language, primary_language
+                            );
+                        }
+                        return Ok(primary_text);
+                    }
+                    warn!(
+                        "Parakeet transcript did not match any installed keyboard language; starting forced-language Nemotron recovery"
+                    );
+                } else {
+                    info!(
+                        "Parakeet returned no usable text; starting forced-language Nemotron recovery"
+                    );
+                }
             }
+            Err(error) => {
+                warn!(
+                    "Parakeet primary transcription failed: {}; starting forced-language Nemotron recovery",
+                    error
+                );
+                primary_error = Some(error.to_string());
+            }
+        }
+
+        if let Some((fallback_text, recovered_language)) =
+            self.recover_wrong_keyboard_language_with_nemotron(audio, languages, settings)
+        {
+            info!(
+                "Wrong-keyboard language recovery completed with '{}'",
+                recovered_language
+            );
+            return Ok(fallback_text);
+        }
+
+        if transcription_result_is_usable(&primary_text, settings, false) {
+            warn!(
+                "Wrong-keyboard recovery found no validated transcript; preserving the original Parakeet text"
+            );
+            Ok(primary_text)
+        } else if primary_error.is_none() {
+            Ok(primary_text)
+        } else {
+            Err(anyhow::anyhow!(
+                "Parakeet and wrong-keyboard Nemotron recovery failed: {}",
+                primary_error.unwrap_or_else(|| "unknown error".to_string())
+            ))
         }
     }
 
@@ -1408,6 +1526,26 @@ impl TranscriptionManager {
                     LoadedEngine::TranscribeCpp(session) => {
                         let mut language_attempts = vec![validated_language.clone()];
                         language_attempts.extend(fallback_languages.iter().cloned());
+
+                        // Wrong Keyboard Language Recovery is a separate
+                        // Follow Keyboard feature. Parakeet V3 auto-detects on
+                        // its one primary run; Nemotron provides the genuinely
+                        // forced per-keyboard-language retries when needed.
+                        if settings.selected_language
+                            == crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE
+                            && active_model.contains("parakeet-tdt-0.6b-v3")
+                            && !settings.translate_to_english
+                        {
+                            return self.transcribe_parakeet_with_wrong_keyboard_recovery(
+                                session,
+                                &audio,
+                                &language_attempts,
+                                &settings,
+                                &model_languages,
+                                model_supports_translate,
+                            );
+                        }
+
                         let mut last_empty_result = String::new();
                         let mut first_usable_result = None;
                         let mut last_error = None;
@@ -1496,54 +1634,6 @@ impl TranscriptionManager {
                                     );
                                 if script_matches && characters_match && language_spans_match {
                                     return Ok(text);
-                                }
-
-                                // Same-script alphabet or lexical-language leakage cannot
-                                // be corrected by Parakeet V3's auto-language decoder.
-                                // Retry retained audio with the prompt-conditioned model.
-                                if attempt_index == 0
-                                    && active_model.contains("parakeet-tdt-0.6b-v3")
-                                    && script_matches
-                                    && (!characters_match || !language_spans_match)
-                                {
-                                    warn!(
-                                        "Transcript for '{}' conflicted with its locale alphabet or text language; trying retained audio with Nemotron fallback",
-                                        attempt_language
-                                    );
-                                    if let Some(fallback_text) = self
-                                        .transcribe_with_nemotron_language_fallback(
-                                            &audio,
-                                            attempt_language,
-                                        )
-                                    {
-                                        let fallback_is_usable = transcription_result_is_usable(
-                                            &fallback_text,
-                                            &settings,
-                                            false,
-                                        );
-                                        let fallback_matches =
-                                            transcription_script_matches_language(
-                                                &fallback_text,
-                                                attempt_language,
-                                            ) && transcription_characters_match_language(
-                                                &fallback_text,
-                                                attempt_language,
-                                            ) && !transcription_contains_conflicting_language_span(
-                                                &fallback_text,
-                                                attempt_language,
-                                            );
-                                        if fallback_is_usable && fallback_matches {
-                                            info!(
-                                                "Using Nemotron fallback transcript for '{}' after locale and text-language validation",
-                                                attempt_language
-                                            );
-                                            return Ok(fallback_text);
-                                        }
-                                        warn!(
-                                            "Nemotron fallback transcript for '{}' did not pass validation; preserving the original Parakeet result",
-                                            attempt_language
-                                        );
-                                    }
                                 }
 
                                 warn!(
@@ -2083,6 +2173,19 @@ fn transcription_characters_match_language(raw: &str, language: &str) -> bool {
                     .as_ref()
                     .is_some_and(|set| set.contains_str(&lowercase))
         })
+}
+
+fn transcription_matches_language(raw: &str, language: &str) -> bool {
+    transcription_script_matches_language(raw, language)
+        && transcription_characters_match_language(raw, language)
+        && !transcription_contains_conflicting_language_span(raw, language)
+}
+
+fn matching_transcript_language<'a>(raw: &str, languages: &'a [String]) -> Option<&'a str> {
+    languages
+        .iter()
+        .find(|language| transcription_matches_language(raw, language))
+        .map(String::as_str)
 }
 
 fn primary_language_subtag(language: &str) -> Option<String> {
@@ -2654,6 +2757,29 @@ mod tests {
             "Сега също говоре на български.",
             "bg"
         ));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn wrong_keyboard_recovery_matches_one_parakeet_result_to_candidates() {
+        let candidates = vec!["de".to_string(), "en".to_string(), "bg".to_string()];
+
+        assert_eq!(
+            matching_transcript_language("Jetzt spreche ich Deutsch.", &candidates),
+            Some("de")
+        );
+        assert_eq!(
+            matching_transcript_language("Now I am speaking English.", &candidates),
+            Some("en")
+        );
+        assert_eq!(
+            matching_transcript_language("Сега говоря на български.", &candidates),
+            Some("bg")
+        );
+        assert_eq!(
+            matching_transcript_language("Št je svârsza spokojna.", &candidates),
+            None
+        );
     }
 
     #[test]

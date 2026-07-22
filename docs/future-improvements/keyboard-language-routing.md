@@ -3,6 +3,10 @@
 **Status:** Retained-audio retry and direct macOS language-metadata mapping are
 implemented.
 
+Parakeet's user-facing wrong-keyboard behavior is implemented as the separate
+[Wrong Keyboard Language Recovery](../wrong-keyboard-language-recovery.md)
+feature.
+
 ## Goal
 
 Handy should treat the active keyboard layout as a strong language hint without
@@ -53,9 +57,11 @@ detection.
 
 ### Retained-audio retry
 
-The `LoadedEngine::TranscribeCpp` batch path constructs the ordered attempts
-and calls `session.run(&audio, ...)` for each one. Every call borrows the same
-in-memory audio vector captured for the original dictation.
+The general `LoadedEngine::TranscribeCpp` batch path constructs the ordered
+attempts and calls `session.run(&audio, ...)` with the same in-memory audio.
+Parakeet V3 is handled by the separate Wrong Keyboard Language Recovery feature:
+it runs Parakeet once, classifies that result against all candidates, and uses
+prompt-conditioned Nemotron for genuinely forced candidate retries.
 
 Handy stops retrying and returns the first usable transcript. A result is
 considered unusable when the same cleanup used for final output reduces it to
@@ -87,14 +93,8 @@ are noisy. The comparison uses BCP-47 primary subtags rather than a hard-coded
 language list. Other platforms fail open until an equivalent system detector is
 available.
 
-When the first attempt has the expected script but fails the alphabet or text
-language check, Handy loads the downloaded prompt-conditioned Nemotron 3.5 Q8
-GGUF as a one-shot fallback and retranscribes the retained in-memory audio with
-the exact model locale (`bg-BG`, `de-DE`, and so on). Parakeet remains the
-selected and cached primary model. A usable Nemotron result is accepted only
-when it passes script, alphabet, and text-language validation. If the fallback
-model is missing, fails, or returns another suspicious result, Handy preserves
-the original Parakeet text rather than discarding the dictation.
+Nemotron recovery policy for Parakeet—including one model load reused across all
+forced candidates—is owned by the separate feature document linked above.
 
 ### Tests and runtime verification
 
@@ -118,23 +118,19 @@ The corrected run passed `en` and returned a transcript successfully.
 
 ### Saved regression: Latinized Bulgarian output
 
-Keep the exact Parakeet output `Št je svârsza spokojna.` and recording
-`handy-1784706498.wav` as a future end-to-end test case. The active keyboard was
-German, so Follow Keyboard tried `de`, `en`, and then `bg`. Apple Natural
-Language classifies the complete text as Croatian with about 92.5% confidence
-and the span `svârsza spokojna` as Polish with about 98.2% confidence. The
-mixture of `Š`, `â`, and `sz` is not Bulgarian orthography; Bulgarian should use
-Cyrillic.
+Keep the exact Parakeet output `Št je svârsza spokojna.` as a regression case.
+Its WAV was pruned after the 50-entry history advanced, so only the text remains
+available for unit validation. The active keyboard was German, so Follow
+Keyboard selected candidates `de`, `en`, and then `bg`. Apple Natural Language
+classifies the complete text as Croatian with about 92.5% confidence and the
+span `svârsza spokojna` as Polish with about 98.2% confidence. The mixture of
+`Š`, `â`, and `sz` is not Bulgarian orthography; Bulgarian should use Cyrillic.
 
-Validation rejected the first Parakeet result for `de` and invoked Nemotron
-with `de-DE` forced, but that produced zero tokens. The subsequent Parakeet
-attempts for `en` and `bg` were also rejected. The script validator correctly
-rejects the text for `bg`, but the Nemotron fallback is limited to the first
-language candidate and therefore was not tried with Bulgarian forced. After all
-candidates failed, the fail-open behavior preserved the first non-empty
-Parakeet result. A future end-to-end regression should verify that each eligible
-keyboard candidate can invoke Nemotron once, so the retained audio reaches
-forced Bulgarian before this result can be returned.
+The original implementation stopped Nemotron recovery after forced German
+returned zero tokens. Wrong Keyboard Language Recovery now owns this case: it
+runs Parakeet only once and reuses one Nemotron session across `de`, `en`, and
+`bg`, so the retained audio reaches forced Bulgarian. The saved WAV remains an
+end-to-end release-regression candidate.
 
 ## macOS language-metadata mapping
 

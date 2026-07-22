@@ -503,6 +503,13 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
 
     let tm = app.state::<Arc<TranscriptionManager>>();
 
+    // Match microphone recordings: freeze the active and enabled keyboard
+    // languages before the batch path runs. Besides keeping headless behavior
+    // representative, this lets saved WAV regressions exercise Wrong Keyboard
+    // Language Recovery end to end.
+    let persisted_language = get_settings(app).selected_language;
+    tm.snapshot_recording_language(&persisted_language);
+
     let model_id = args
         .model
         .clone()
