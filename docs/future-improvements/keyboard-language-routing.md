@@ -59,17 +59,22 @@ in-memory audio vector captured for the original dictation.
 
 Handy stops retrying and returns the first usable transcript. A result is
 considered unusable when the same cleanup used for final output reduces it to
-empty text, including whitespace-only or configured filler-only output. An
-engine error also advances to the next candidate. If all candidates fail or
-remain empty, the existing empty/error handling runs; the source recording is
-still retained in transcription history according to the normal history
-settings.
+empty text, including whitespace-only or configured filler-only output. In
+**Follow keyboard** mode, a non-empty result is also rejected when all of its
+letters use a writing system incompatible with the attempted language. The
+check is general: ICU/CLDR likely-subtag data resolves the language's expected
+script and Unicode properties classify the transcript; there is no hard-coded
+language list. Script-neutral, mixed-script, and composite-script cases fail
+open. An engine error also advances to the next candidate. If all candidates
+fail or remain unusable, the existing empty/error handling runs; the source
+recording is still retained in transcription history according to the normal
+history settings.
 
 This fallback currently applies to `transcribe-cpp`, which is the backend used
-by the installed Parakeet V3 GGUF model. It deliberately does not retry when a
-wrong language produces non-empty but inaccurate text: deciding that such text
-is wrong would require confidence scoring or language identification and could
-replace a valid transcript incorrectly.
+by the installed Parakeet V3 GGUF model. Same-script wrong-language text still
+cannot be identified safely without confidence scoring or language
+identification; the script check only rejects clear writing-system mismatches
+such as Cyrillic output from a German attempt.
 
 ### Tests and runtime verification
 
@@ -79,7 +84,9 @@ The implementation is covered by tests for:
 - explicit-language single-attempt behavior;
 - reading current and enabled input sources on macOS;
 - conversion of strict locales to model-advertised base codes; and
-- retry eligibility using the final-output cleanup rules.
+- retry eligibility using the final-output cleanup rules; and
+- CLDR/Unicode script compatibility, including explicit script subtags and
+  fail-open behavior for script-neutral or composite-script text.
 
 During implementation, a recording that had previously failed because Handy
 passed unsupported `en-US` to Parakeet was replayed through the installed app.

@@ -1393,7 +1393,29 @@ impl TranscriptionManager {
                             };
 
                             if transcription_result_is_usable(&text, &settings, model_is_whisper) {
-                                return Ok(text);
+                                let script_matches = settings.selected_language
+                                    != crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE
+                                    || transcription_script_matches_language(
+                                        &text,
+                                        attempt_language,
+                                    );
+                                if script_matches {
+                                    return Ok(text);
+                                }
+
+                                warn!(
+                                    "Transcript for '{}' used an incompatible writing system; rejecting it before keyboard-language retry",
+                                    attempt_language
+                                );
+                                if let Some(next_language) =
+                                    language_attempts.get(attempt_index + 1)
+                                {
+                                    info!(
+                                        "Retrying retained audio with installed keyboard language '{}'",
+                                        next_language
+                                    );
+                                }
+                                continue;
                             }
 
                             last_empty_result = text;
@@ -1819,6 +1841,59 @@ fn transcription_result_is_usable(
         .is_empty()
 }
 
+/// Reject a transcript that is entirely written in a different script from
+/// the attempted language. CLDR likely-subtag data supplies the language's
+/// expected script, and Unicode properties classify the returned characters,
+/// so this remains algorithmic rather than maintaining a language allowlist.
+/// Common/inherited characters, script-neutral text, and mixed-script text that
+/// contains the expected script all fail open.
+fn transcription_script_matches_language(raw: &str, language: &str) -> bool {
+    use icu_locale::{Locale, LocaleExpander};
+    use icu_properties::props::Script;
+    use icu_properties::script::ScriptWithExtensions;
+
+    let Ok(mut locale) = language.parse::<Locale>() else {
+        return true;
+    };
+    LocaleExpander::new_extended().maximize(&mut locale.id);
+    let Some(locale_script) = locale.id.script else {
+        return true;
+    };
+    let expected_script = Script::from(locale_script);
+    let roundtrip_script: icu_locale::subtags::Script = expected_script.into();
+    // Some locale scripts (for example composite writing systems) do not map
+    // one-to-one to a Unicode Script property. Do not guess for those cases.
+    if roundtrip_script != locale_script {
+        return true;
+    }
+    if matches!(
+        expected_script,
+        Script::Common | Script::Inherited | Script::Unknown
+    ) {
+        return true;
+    }
+
+    let scripts = ScriptWithExtensions::new();
+    if scripts
+        .get_script_extensions_set(expected_script)
+        .is_empty()
+    {
+        return true;
+    }
+    let mut expected_letters = 0_usize;
+    let mut other_letters = 0_usize;
+    for character in raw.chars().filter(|character| character.is_alphabetic()) {
+        let script = scripts.get_script_val(character);
+        if script == expected_script || scripts.has_script(character, expected_script) {
+            expected_letters += 1;
+        } else if !matches!(script, Script::Common | Script::Inherited | Script::Unknown) {
+            other_letters += 1;
+        }
+    }
+
+    expected_letters > 0 || other_letters < 2
+}
+
 /// Optional text cleanup must never discard a successful model result. The
 /// transform is pure and owns its input, so recovering the untouched text is
 /// safe even if a bug in custom-word or filler filtering unwinds.
@@ -2223,6 +2298,46 @@ mod tests {
             "A useful transcript",
             &settings,
             false
+        ));
+    }
+
+    #[test]
+    fn transcript_script_check_uses_cldr_likely_subtags() {
+        assert!(transcription_script_matches_language(
+            "This is English.",
+            "en"
+        ));
+        assert!(transcription_script_matches_language(
+            "Das ist Deutsch.",
+            "de-DE"
+        ));
+        assert!(!transcription_script_matches_language("Эсты мув.", "de"));
+        assert!(transcription_script_matches_language(
+            "Това е български.",
+            "bg"
+        ));
+        assert!(!transcription_script_matches_language(
+            "This is not Bulgarian.",
+            "bg-BG"
+        ));
+    }
+
+    #[test]
+    fn transcript_script_check_honors_explicit_script_subtags_and_fails_open() {
+        assert!(transcription_script_matches_language(
+            "Ovo je srpski.",
+            "sr-Latn"
+        ));
+        assert!(transcription_script_matches_language(
+            "Ово је српски.",
+            "sr-Cyrl"
+        ));
+        assert!(transcription_script_matches_language("123 — 👍", "de"));
+        assert!(transcription_script_matches_language("OpenAI тест", "en"));
+        assert!(transcription_script_matches_language("日本語", "ja"));
+        assert!(transcription_script_matches_language(
+            "text",
+            "not_a_locale"
         ));
     }
 
