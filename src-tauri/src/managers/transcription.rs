@@ -1262,7 +1262,9 @@ impl TranscriptionManager {
             };
             let fallback_is_usable =
                 transcription_result_is_usable(&fallback_text, settings, false);
-            let fallback_matches = transcription_matches_language(&fallback_text, language_intent);
+            let fallback_matches =
+                !short_utterance_conflicts_with_candidates(&fallback_text, languages)
+                    && transcription_matches_language(&fallback_text, language_intent);
             if fallback_is_usable && fallback_matches {
                 info!(
                     "Wrong-keyboard recovery accepted Nemotron transcript for '{}'",
@@ -2182,6 +2184,10 @@ fn transcription_matches_language(raw: &str, language: &str) -> bool {
 }
 
 fn matching_transcript_language<'a>(raw: &str, languages: &'a [String]) -> Option<&'a str> {
+    if short_utterance_conflicts_with_candidates(raw, languages) {
+        return None;
+    }
+
     languages
         .iter()
         .find(|language| transcription_matches_language(raw, language))
@@ -2195,6 +2201,67 @@ fn primary_language_subtag(language: &str) -> Option<String> {
         .next()
         .filter(|subtag| !subtag.is_empty())
         .map(str::to_ascii_lowercase)
+}
+
+/// A single word is too short for a reliable dominant-language decision, but
+/// several hypotheses can still provide strong negative evidence. Treat it as
+/// suspicious only when at least 85% of the returned probability mass belongs
+/// to languages outside every installed-keyboard candidate. Ambiguous names
+/// remain below that threshold and fail open.
+#[cfg(target_os = "macos")]
+fn short_utterance_outside_candidate_probability(raw: &str, languages: &[String]) -> Option<f64> {
+    use objc2::rc::autoreleasepool;
+    use objc2_foundation::NSString;
+    use objc2_natural_language::NLLanguageRecognizer;
+
+    let mut words = raw
+        .split(|character: char| !character.is_alphabetic())
+        .filter(|word| !word.is_empty());
+    let word = words.next()?;
+    if words.next().is_some() || languages.is_empty() {
+        return None;
+    }
+    let candidate_bases = languages
+        .iter()
+        .filter_map(|language| primary_language_subtag(language))
+        .collect::<Vec<_>>();
+    if candidate_bases.is_empty() {
+        return None;
+    }
+
+    autoreleasepool(|_| {
+        let text = NSString::from_str(word);
+        let recognizer = unsafe { NLLanguageRecognizer::new() };
+        unsafe { recognizer.processString(&text) };
+        let hypotheses = unsafe { recognizer.languageHypothesesWithMaximum(5) };
+        let (detected_languages, confidences) = hypotheses.to_vecs();
+        Some(
+            detected_languages
+                .iter()
+                .zip(confidences.iter())
+                .filter(|(detected, _)| {
+                    primary_language_subtag(&detected.to_string()).is_some_and(|detected_base| {
+                        !candidate_bases
+                            .iter()
+                            .any(|candidate| candidate == &detected_base)
+                    })
+                })
+                .map(|(_, confidence)| confidence.doubleValue())
+                .sum(),
+        )
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn short_utterance_outside_candidate_probability(_raw: &str, _languages: &[String]) -> Option<f64> {
+    None
+}
+
+fn short_utterance_conflicts_with_candidates(raw: &str, languages: &[String]) -> bool {
+    const MIN_OUTSIDE_CANDIDATE_PROBABILITY: f64 = 0.85;
+
+    short_utterance_outside_candidate_probability(raw, languages)
+        .is_some_and(|probability| probability >= MIN_OUTSIDE_CANDIDATE_PROBABILITY)
 }
 
 fn language_hypothesis_is_conflicting(
@@ -2789,6 +2856,39 @@ mod tests {
             matching_transcript_language("Št je svârsza spokojna.", &candidates),
             None
         );
+        assert_eq!(matching_transcript_language("Está.", &candidates), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn short_utterance_rule_rejects_unsupported_language_but_keeps_names() {
+        let candidates = vec!["de".to_string(), "en".to_string(), "bg".to_string()];
+
+        let outside_probability =
+            short_utterance_outside_candidate_probability("Está.", &candidates).unwrap();
+        assert!(outside_probability > 0.99);
+        assert!(short_utterance_conflicts_with_candidates(
+            "Está.",
+            &candidates
+        ));
+        assert!(!short_utterance_conflicts_with_candidates(
+            "Alice",
+            &candidates
+        ));
+        assert!(!short_utterance_conflicts_with_candidates(
+            "Microsoft",
+            &candidates
+        ));
+        assert!(!short_utterance_conflicts_with_candidates(
+            "OpenAI тест",
+            &candidates
+        ));
+
+        let spanish_enabled = vec!["de".to_string(), "es".to_string()];
+        assert!(!short_utterance_conflicts_with_candidates(
+            "Está.",
+            &spanish_enabled
+        ));
     }
 
     #[test]

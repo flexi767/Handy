@@ -25,6 +25,9 @@ as follows:
 2. Validate that single result against every frozen candidate in active-first
    order using Unicode script, CLDR exemplar characters, and macOS offline text
    language recognition.
+   For a one-word result, inspect the five strongest language hypotheses. If at
+   least 85% of their probability mass belongs to languages outside all enabled
+   candidates, treat the word as suspicious and continue to forced recovery.
 3. Return the Parakeet text when it matches a candidate. Log when the matching
    candidate differs from the active keyboard, because that is a successful
    wrong-keyboard recovery.
@@ -61,6 +64,19 @@ English result was returned. This verifies the real primary-rejection and
 forced-language recovery path; a future live reproduction should additionally
 exercise continuation past an empty first candidate into a later language.
 
+History entry 196 captured the one-word Parakeet result `Está.` with candidates
+`de`, `en`, and `bg`. macOS assigns essentially all of its five strongest
+hypothesis mass to Portuguese, Spanish, Catalan, Italian, and Slovak—none of
+which was enabled. The short-utterance rule therefore rejects it and starts
+Nemotron recovery. Diffuse names such as `Alice`, `Microsoft`, and `OpenAI` stay
+below the 85% threshold and remain accepted.
+
+The exact retained WAV was replayed through the signed installed build with
+candidates `en`, `de`, and `bg`. Parakeet's `Está.` was rejected, forced-English
+Nemotron ran, and the recovery path returned `Ist that.`. The recovered wording
+is imperfect, but the unsupported one-word Parakeet result no longer bypasses
+recovery.
+
 ## Boundaries and future work
 
 - Mixed-language output is valid. The invariant is that each substantial span
@@ -70,8 +86,8 @@ exercise continuation past an empty first candidate into a later language.
   in an unsupported language remains a recovery signal.
 - Text-language span recognition currently uses Apple's offline Natural
   Language framework; other platforms retain script and alphabet validation.
-- Very short same-script utterances may be ambiguous and intentionally prefer
-  the active keyboard.
+- Ambiguous one-word results fail open when the five strongest hypotheses do
+  not place at least 85% probability outside the enabled candidate set.
 - Suspicious-history labeling and an automated checked-in WAV replay corpus are
   separate future improvements. The current fail-open behavior still preserves
   a non-empty primary result when every validated recovery fails.
