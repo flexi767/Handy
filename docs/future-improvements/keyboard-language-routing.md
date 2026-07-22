@@ -118,20 +118,23 @@ The corrected run passed `en` and returned a transcript successfully.
 
 ### Saved regression: Latinized Bulgarian output
 
-Keep the exact Parakeet output `Št je svârsza spokojna.` as a future end-to-end
-test case for Bulgarian Follow Keyboard dictation. Apple Natural Language
-classifies the complete text as Croatian with about 92.5% confidence and the
-span `svârsza spokojna` as Polish with about 98.2% confidence. The mixture of
-`Š`, `â`, and `sz` is not Bulgarian orthography; Bulgarian should use Cyrillic.
+Keep the exact Parakeet output `Št je svârsza spokojna.` and recording
+`handy-1784706498.wav` as a future end-to-end test case. The active keyboard was
+German, so Follow Keyboard tried `de`, `en`, and then `bg`. Apple Natural
+Language classifies the complete text as Croatian with about 92.5% confidence
+and the span `svârsza spokojna` as Polish with about 98.2% confidence. The
+mixture of `Š`, `â`, and `sz` is not Bulgarian orthography; Bulgarian should use
+Cyrillic.
 
-The script validator correctly rejects this output for `bg`. The outstanding
-routing gap is that wrong-script output advances through the other installed
-keyboard languages, while the forced-language Nemotron fallback currently runs
-only for a same-script alphabet or lexical-language conflict. If every keyboard
-retry fails, the fail-open behavior preserves the first non-empty Parakeet
-result. A future end-to-end regression should verify that retained audio is
-instead retried through Nemotron with Bulgarian forced before that result can be
-returned.
+Validation rejected the first Parakeet result for `de` and invoked Nemotron
+with `de-DE` forced, but that produced zero tokens. The subsequent Parakeet
+attempts for `en` and `bg` were also rejected. The script validator correctly
+rejects the text for `bg`, but the Nemotron fallback is limited to the first
+language candidate and therefore was not tried with Bulgarian forced. After all
+candidates failed, the fail-open behavior preserved the first non-empty
+Parakeet result. A future end-to-end regression should verify that each eligible
+keyboard candidate can invoke Nemotron once, so the retained audio reaches
+forced Bulgarian before this result can be returned.
 
 ## macOS language-metadata mapping
 
