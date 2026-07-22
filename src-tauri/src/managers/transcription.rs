@@ -35,6 +35,8 @@ use transcribe_rs::{
 
 const STREAM_PERF_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_FINALIZE_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
+const NEMOTRON_LANGUAGE_FALLBACK_MODEL_ID: &str =
+    "handy-computer/nemotron-3.5-asr-streaming-0.6b-gguf/nemotron-3.5-asr-streaming-0.6b-Q8_0.gguf";
 
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
@@ -1176,6 +1178,85 @@ impl TranscriptionManager {
         .emit(&self.app_handle);
     }
 
+    /// Retry retained audio with the downloaded prompt-conditioned Nemotron
+    /// model without replacing the user's selected/cached primary engine.
+    /// Missing models and inference failures fail open so the caller can retain
+    /// the original transcript.
+    fn transcribe_with_nemotron_language_fallback(
+        &self,
+        audio: &[f32],
+        language: &str,
+    ) -> Option<String> {
+        let model_info = self
+            .model_manager
+            .get_model_info(NEMOTRON_LANGUAGE_FALLBACK_MODEL_ID)?;
+        if !model_info.is_downloaded || !matches!(model_info.engine_type, EngineType::TranscribeCpp)
+        {
+            debug!(
+                "Nemotron language fallback is unavailable because '{}' is not downloaded",
+                NEMOTRON_LANGUAGE_FALLBACK_MODEL_ID
+            );
+            return None;
+        }
+
+        let model_path = match self
+            .model_manager
+            .get_model_path(NEMOTRON_LANGUAGE_FALLBACK_MODEL_ID)
+        {
+            Ok(path) => path,
+            Err(error) => {
+                warn!("Failed to resolve Nemotron fallback model: {}", error);
+                return None;
+            }
+        };
+        let settings = get_settings(&self.app_handle);
+        let accelerator = settings.transcribe_accelerator;
+        let options = ModelOptions {
+            backend: select_transcribe_backend(accelerator),
+            gpu_device: resolve_gpu_device(accelerator, settings.transcribe_gpu_device),
+        };
+        let model = match Model::load_with(&model_path, &options) {
+            Ok(model) => model,
+            Err(error) => {
+                warn!("Failed to load Nemotron language fallback: {}", error);
+                return None;
+            }
+        };
+        let mut session = match model.session() {
+            Ok(session) => session,
+            Err(error) => {
+                warn!("Failed to create Nemotron fallback session: {}", error);
+                return None;
+            }
+        };
+        let caps = session.model().capabilities();
+        let run_plan = transcribe_cpp_run_plan(false, language, &caps.languages, false);
+        let Some(language) = run_plan.language else {
+            warn!(
+                "Nemotron fallback does not advertise the requested language '{}'",
+                language
+            );
+            return None;
+        };
+        let run_options = RunOptions {
+            task: run_plan.task,
+            language: Some(language.clone()),
+            target_language: run_plan.target_language,
+            ..Default::default()
+        };
+        info!(
+            "Running retained audio through Nemotron fallback with language '{}'",
+            language
+        );
+        match session.run(audio, &run_options) {
+            Ok(transcription) => Some(transcription.text),
+            Err(error) => {
+                warn!("Nemotron language fallback failed: {}", error);
+                None
+            }
+        }
+    }
+
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
         #[cfg(debug_assertions)]
         if std::env::var("HANDY_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
@@ -1328,6 +1409,7 @@ impl TranscriptionManager {
                         let mut language_attempts = vec![validated_language.clone()];
                         language_attempts.extend(fallback_languages.iter().cloned());
                         let mut last_empty_result = String::new();
+                        let mut first_usable_result = None;
                         let mut last_error = None;
 
                         for (attempt_index, attempt_language) in
@@ -1393,18 +1475,73 @@ impl TranscriptionManager {
                             };
 
                             if transcription_result_is_usable(&text, &settings, model_is_whisper) {
+                                first_usable_result.get_or_insert_with(|| text.clone());
                                 let script_matches = settings.selected_language
                                     != crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE
                                     || transcription_script_matches_language(
                                         &text,
                                         attempt_language,
                                     );
-                                if script_matches {
+                                let characters_match = settings.selected_language
+                                    != crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE
+                                    || transcription_characters_match_language(
+                                        &text,
+                                        attempt_language,
+                                    );
+                                if script_matches && characters_match {
                                     return Ok(text);
                                 }
 
+                                // A same-script alphabet mismatch (for example Ukrainian
+                                // `і` in a Bulgarian result) cannot be corrected by
+                                // Parakeet V3's auto-language decoder. Retry the retained
+                                // audio once with the downloaded prompt-conditioned
+                                // Nemotron model, while keeping Parakeet as the selected
+                                // and cached primary model.
+                                if attempt_index == 0
+                                    && active_model.contains("parakeet-tdt-0.6b-v3")
+                                    && script_matches
+                                    && !characters_match
+                                {
+                                    warn!(
+                                        "Transcript for '{}' contained letters outside the locale exemplar set; trying retained audio with Nemotron fallback",
+                                        attempt_language
+                                    );
+                                    if let Some(fallback_text) = self
+                                        .transcribe_with_nemotron_language_fallback(
+                                            &audio,
+                                            attempt_language,
+                                        )
+                                    {
+                                        let fallback_is_usable = transcription_result_is_usable(
+                                            &fallback_text,
+                                            &settings,
+                                            false,
+                                        );
+                                        let fallback_matches = transcription_script_matches_language(
+                                            &fallback_text,
+                                            attempt_language,
+                                        )
+                                            && transcription_characters_match_language(
+                                                &fallback_text,
+                                                attempt_language,
+                                            );
+                                        if fallback_is_usable && fallback_matches {
+                                            info!(
+                                                "Using Nemotron fallback transcript for '{}' after locale alphabet validation",
+                                                attempt_language
+                                            );
+                                            return Ok(fallback_text);
+                                        }
+                                        warn!(
+                                            "Nemotron fallback transcript for '{}' did not pass validation; preserving the original Parakeet result",
+                                            attempt_language
+                                        );
+                                    }
+                                }
+
                                 warn!(
-                                    "Transcript for '{}' used an incompatible writing system; rejecting it before keyboard-language retry",
+                                    "Transcript for '{}' did not match the expected writing system or locale alphabet; rejecting it before keyboard-language retry",
                                     attempt_language
                                 );
                                 if let Some(next_language) =
@@ -1427,7 +1564,12 @@ impl TranscriptionManager {
                             }
                         }
 
-                        if !last_empty_result.is_empty() || last_error.is_none() {
+                        if let Some(original_text) = first_usable_result {
+                            warn!(
+                                "No validated retry succeeded; preserving the original transcription"
+                            );
+                            Ok(original_text)
+                        } else if !last_empty_result.is_empty() || last_error.is_none() {
                             Ok(last_empty_result)
                         } else {
                             Err(anyhow::anyhow!(
@@ -1841,6 +1983,30 @@ fn transcription_result_is_usable(
         .is_empty()
 }
 
+fn expected_script_for_language(language: &str) -> Option<icu_properties::props::Script> {
+    use icu_locale::{Locale, LocaleExpander};
+    use icu_properties::props::Script;
+
+    let mut locale = language.parse::<Locale>().ok()?;
+    LocaleExpander::new_extended().maximize(&mut locale.id);
+    let locale_script = locale.id.script?;
+    let expected_script = Script::from(locale_script);
+    let roundtrip_script: icu_locale::subtags::Script = expected_script.into();
+    // Some locale scripts (for example composite writing systems) do not map
+    // one-to-one to a Unicode Script property. Do not guess for those cases.
+    if roundtrip_script != locale_script {
+        return None;
+    }
+    if matches!(
+        expected_script,
+        Script::Common | Script::Inherited | Script::Unknown
+    ) {
+        return None;
+    }
+
+    Some(expected_script)
+}
+
 /// Reject a transcript that is entirely written in a different script from
 /// the attempted language. CLDR likely-subtag data supplies the language's
 /// expected script, and Unicode properties classify the returned characters,
@@ -1848,30 +2014,12 @@ fn transcription_result_is_usable(
 /// Common/inherited characters, script-neutral text, and mixed-script text that
 /// contains the expected script all fail open.
 fn transcription_script_matches_language(raw: &str, language: &str) -> bool {
-    use icu_locale::{Locale, LocaleExpander};
     use icu_properties::props::Script;
     use icu_properties::script::ScriptWithExtensions;
 
-    let Ok(mut locale) = language.parse::<Locale>() else {
+    let Some(expected_script) = expected_script_for_language(language) else {
         return true;
     };
-    LocaleExpander::new_extended().maximize(&mut locale.id);
-    let Some(locale_script) = locale.id.script else {
-        return true;
-    };
-    let expected_script = Script::from(locale_script);
-    let roundtrip_script: icu_locale::subtags::Script = expected_script.into();
-    // Some locale scripts (for example composite writing systems) do not map
-    // one-to-one to a Unicode Script property. Do not guess for those cases.
-    if roundtrip_script != locale_script {
-        return true;
-    }
-    if matches!(
-        expected_script,
-        Script::Common | Script::Inherited | Script::Unknown
-    ) {
-        return true;
-    }
 
     let scripts = ScriptWithExtensions::new();
     if scripts
@@ -1892,6 +2040,43 @@ fn transcription_script_matches_language(raw: &str, language: &str) -> bool {
     }
 
     expected_letters > 0 || other_letters < 2
+}
+
+/// Check letters from the language's expected script against CLDR's main and
+/// auxiliary exemplar sets. This catches same-script language leakage such as
+/// Ukrainian `і` in Bulgarian while allowing foreign-script names like
+/// `OpenAI` inside otherwise Bulgarian text. Unknown locales/data fail open.
+fn transcription_characters_match_language(raw: &str, language: &str) -> bool {
+    use icu_locale::exemplar_chars::ExemplarCharacters;
+    use icu_locale::Locale;
+    use icu_properties::script::ScriptWithExtensions;
+
+    let Some(expected_script) = expected_script_for_language(language) else {
+        return true;
+    };
+    let Ok(locale) = language.parse::<Locale>() else {
+        return true;
+    };
+    let data_locale = locale.into();
+    let Ok(main) = ExemplarCharacters::try_new_main(&data_locale) else {
+        return true;
+    };
+    let auxiliary = ExemplarCharacters::try_new_auxiliary(&data_locale).ok();
+    let scripts = ScriptWithExtensions::new();
+
+    raw.chars()
+        .filter(|character| character.is_alphabetic())
+        .filter(|character| {
+            scripts.get_script_val(*character) == expected_script
+                || scripts.has_script(*character, expected_script)
+        })
+        .all(|character| {
+            let lowercase = character.to_lowercase().collect::<String>();
+            main.contains_str(&lowercase)
+                || auxiliary
+                    .as_ref()
+                    .is_some_and(|set| set.contains_str(&lowercase))
+        })
 }
 
 /// Optional text cleanup must never discard a successful model result. The
@@ -2336,6 +2521,34 @@ mod tests {
         assert!(transcription_script_matches_language("OpenAI тест", "en"));
         assert!(transcription_script_matches_language("日本語", "ja"));
         assert!(transcription_script_matches_language(
+            "text",
+            "not_a_locale"
+        ));
+    }
+
+    #[test]
+    fn transcript_alphabet_check_catches_same_script_language_leakage() {
+        assert!(transcription_characters_match_language(
+            "Това е българска снимка.",
+            "bg-BG"
+        ));
+        assert!(!transcription_characters_match_language(
+            "Моля ти протиміснимка.",
+            "bg"
+        ));
+    }
+
+    #[test]
+    fn transcript_alphabet_check_allows_auxiliary_and_foreign_script_letters() {
+        assert!(transcription_characters_match_language(
+            "OpenAI тест на български.",
+            "bg"
+        ));
+        assert!(transcription_characters_match_language(
+            "Das Café ist geöffnet.",
+            "de-DE"
+        ));
+        assert!(transcription_characters_match_language(
             "text",
             "not_a_locale"
         ));

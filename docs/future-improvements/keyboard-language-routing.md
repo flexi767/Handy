@@ -71,10 +71,21 @@ recording is still retained in transcription history according to the normal
 history settings.
 
 This fallback currently applies to `transcribe-cpp`, which is the backend used
-by the installed Parakeet V3 GGUF model. Same-script wrong-language text still
-cannot be identified safely without confidence scoring or language
-identification; the script check only rejects clear writing-system mismatches
-such as Cyrillic output from a German attempt.
+by the installed Parakeet V3 GGUF model. In addition to the script check, Handy
+uses CLDR's main and auxiliary exemplar character sets for the attempted locale.
+Letters from the expected script that do not belong to that locale (for example
+Ukrainian `і` in a Bulgarian result) mark the transcript as suspicious. Letters
+from another script, such as `OpenAI` in Bulgarian text, do not trigger this
+alphabet-level check.
+
+When the first attempt has the expected script but fails the alphabet check,
+Handy loads the downloaded prompt-conditioned Nemotron 3.5 Q8 GGUF as a
+one-shot fallback and retranscribes the retained in-memory audio with the exact
+model locale (`bg-BG`, `de-DE`, and so on). Parakeet remains the selected and
+cached primary model. A usable Nemotron result is accepted only when it passes
+both script and alphabet validation. If the fallback model is missing, fails,
+or returns another suspicious result, Handy preserves the original Parakeet
+text rather than discarding the dictation.
 
 ### Tests and runtime verification
 
@@ -86,7 +97,9 @@ The implementation is covered by tests for:
 - conversion of strict locales to model-advertised base codes; and
 - retry eligibility using the final-output cleanup rules; and
 - CLDR/Unicode script compatibility, including explicit script subtags and
-  fail-open behavior for script-neutral or composite-script text.
+  fail-open behavior for script-neutral or composite-script text; and
+- CLDR exemplar-set validation for same-script leakage, auxiliary characters,
+  and embedded foreign-script names.
 
 During implementation, a recording that had previously failed because Handy
 passed unsupported `en-US` to Parakeet was replayed through the installed app.
