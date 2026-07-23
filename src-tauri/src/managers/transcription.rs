@@ -1165,28 +1165,27 @@ impl TranscriptionManager {
             .ok()?;
         let caps = session.model().capabilities();
         let model_languages = caps.languages.clone();
-        let model_supports_translate = caps.supports_translate;
 
         for candidate in candidates {
-            let run_plan = transcribe_cpp_run_plan(
-                settings.translate_to_english,
-                candidate,
-                &model_languages,
-                model_supports_translate,
-            );
-            // Skip a candidate the fallback model cannot actually force.
-            if run_plan.language.is_none() {
+            // The fallback model may advertise full BCP-47 locales ("bg-BG")
+            // while candidates are base subtags ("bg"). Match on the base subtag
+            // and force the model's own locale code so the language is actually
+            // applied (an exact-string match would silently skip every one).
+            let candidate_base = crate::keyboard_language::primary_subtag(candidate);
+            let Some(forced_language) = model_languages.iter().find(|language| {
+                crate::keyboard_language::primary_subtag(language) == candidate_base
+            }) else {
+                // The fallback model cannot serve this candidate language.
                 continue;
-            }
+            };
             let run_options = RunOptions {
-                task: run_plan.task,
-                language: run_plan.language.clone(),
-                target_language: run_plan.target_language,
+                task: Task::Transcribe,
+                language: Some(forced_language.clone()),
                 ..Default::default()
             };
             info!(
-                "Follow-keyboard recovery retrying retained audio forced to '{}' on '{}'",
-                candidate, fallback.id
+                "Follow-keyboard recovery retrying retained audio forced to '{}' ('{}') on '{}'",
+                candidate, forced_language, fallback.id
             );
             let text = match session.run(audio, &run_options) {
                 Ok(transcription) => {
