@@ -1,6 +1,6 @@
 use crate::audio_toolkit::{apply_custom_words, filter_transcription_output};
 use crate::managers::audio::AudioRecordingManager;
-use crate::managers::model::{EngineType, ModelManager};
+use crate::managers::model::{EngineType, ModelInfo, ModelManager};
 use crate::settings::{
     get_settings, AppSettings, ModelUnloadTimeout, OrtAcceleratorSetting,
     TranscribeAcceleratorSetting,
@@ -1109,6 +1109,154 @@ impl TranscriptionManager {
         .emit(&self.app_handle);
     }
 
+    /// Pick a downloaded, forced-language transcribe-cpp model able to serve at
+    /// least one candidate language. Capability-driven — no model ID is
+    /// hardcoded, so whichever compatible multilingual model the user has
+    /// downloaded (Nemotron in our setup) becomes the fallback. Prefers the most
+    /// accurate match and never reuses the active primary model.
+    fn select_forced_language_fallback(
+        &self,
+        active_model_id: &str,
+        candidates: &[String],
+    ) -> Option<ModelInfo> {
+        choose_forced_language_fallback(
+            self.model_manager.get_available_models(),
+            active_model_id,
+            candidates,
+        )
+    }
+
+    /// Follow-keyboard recovery. When an auto-detecting primary model returns a
+    /// language the user does not type, retry the retained audio through a
+    /// forced-language fallback model, trying each enabled-keyboard language
+    /// (active first). Returns the first usable, non-conflicting transcript, or
+    /// `None` to keep the original. The user's selected/cached primary model is
+    /// never replaced.
+    fn recover_follow_keyboard_language(
+        &self,
+        audio: &[f32],
+        candidates: &[String],
+        active_model_id: &str,
+        settings: &AppSettings,
+    ) -> Option<String> {
+        let fallback = self.select_forced_language_fallback(active_model_id, candidates)?;
+        let model_path = self
+            .model_manager
+            .get_model_path(&fallback.id)
+            .map_err(|error| warn!("Follow-keyboard fallback path unresolved: {}", error))
+            .ok()?;
+
+        let accelerator = settings.transcribe_accelerator;
+        let options = ModelOptions {
+            backend: select_transcribe_backend(accelerator),
+            gpu_device: resolve_gpu_device(accelerator, settings.transcribe_gpu_device),
+        };
+        let model = Model::load_with(&model_path, &options)
+            .map_err(|error| {
+                warn!(
+                    "Follow-keyboard fallback '{}' failed to load: {}",
+                    fallback.id, error
+                )
+            })
+            .ok()?;
+        let mut session = model
+            .session()
+            .map_err(|error| warn!("Follow-keyboard fallback session failed: {}", error))
+            .ok()?;
+        let caps = session.model().capabilities();
+        let model_languages = caps.languages.clone();
+        let model_supports_translate = caps.supports_translate;
+
+        for candidate in candidates {
+            let run_plan = transcribe_cpp_run_plan(
+                settings.translate_to_english,
+                candidate,
+                &model_languages,
+                model_supports_translate,
+            );
+            // Skip a candidate the fallback model cannot actually force.
+            if run_plan.language.is_none() {
+                continue;
+            }
+            let run_options = RunOptions {
+                task: run_plan.task,
+                language: run_plan.language.clone(),
+                target_language: run_plan.target_language,
+                ..Default::default()
+            };
+            info!(
+                "Follow-keyboard recovery retrying retained audio forced to '{}' on '{}'",
+                candidate, fallback.id
+            );
+            let text = match session.run(audio, &run_options) {
+                Ok(transcription) => {
+                    post_process_transcription_text(transcription.text, settings, false)
+                }
+                Err(error) => {
+                    warn!(
+                        "Follow-keyboard forced '{}' run failed: {}",
+                        candidate, error
+                    );
+                    continue;
+                }
+            };
+            if !text.trim().is_empty()
+                && !crate::language_validator::transcript_conflicts_with_candidates(
+                    &text, candidates,
+                )
+            {
+                info!("Follow-keyboard recovery accepted forced '{}'", candidate);
+                return Some(text);
+            }
+        }
+        None
+    }
+
+    /// Gate and run [`Self::recover_follow_keyboard_language`]. No-op unless the
+    /// user routes by keyboard, the active model auto-detects, and the primary
+    /// transcript conflicts with the languages the user types.
+    fn maybe_recover_follow_keyboard_language(
+        &self,
+        primary_text: String,
+        audio: &[f32],
+        settings: &AppSettings,
+        active_model_id: &str,
+    ) -> String {
+        if settings.selected_language != crate::keyboard_language::FOLLOW_KEYBOARD_LANGUAGE {
+            return primary_text;
+        }
+        // A must-pick model already received the resolved keyboard language, so
+        // only auto-detecting primaries can land in the wrong language.
+        let auto_detects = self
+            .model_manager
+            .get_model_info(active_model_id)
+            .is_some_and(|info| info.supports_language_detection);
+        if !auto_detects {
+            return primary_text;
+        }
+        let candidates = crate::keyboard_language::enabled_keyboard_languages();
+        if candidates.is_empty()
+            || !crate::language_validator::transcript_conflicts_with_candidates(
+                &primary_text,
+                &candidates,
+            )
+        {
+            return primary_text;
+        }
+
+        warn!(
+            "Follow-keyboard: primary transcript conflicts with enabled keyboards {:?}; attempting recovery",
+            candidates
+        );
+        self.recover_follow_keyboard_language(audio, &candidates, active_model_id, settings)
+            .unwrap_or_else(|| {
+                warn!(
+                    "Follow-keyboard recovery found no validated transcript; keeping the original"
+                );
+                primary_text
+            })
+    }
+
     pub fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
         #[cfg(debug_assertions)]
         if std::env::var("HANDY_FORCE_TRANSCRIPTION_FAILURE").is_ok() {
@@ -1400,6 +1548,16 @@ impl TranscriptionManager {
         // same as the ONNX engines.
         let filtered_result = post_process_transcription_text(result, &settings, model_is_whisper);
 
+        // Follow-keyboard recovery: if the user routes language by keyboard and
+        // an auto-detecting primary produced a language they do not type, retry
+        // the retained audio through a forced-language fallback model.
+        let filtered_result = self.maybe_recover_follow_keyboard_language(
+            filtered_result,
+            &audio,
+            &settings,
+            &active_model,
+        );
+
         let et = std::time::Instant::now();
         let translation_note = if settings.translate_to_english {
             " (translated)"
@@ -1568,6 +1726,38 @@ fn effective_language_for_model(
         ),
         None => intent,
     }
+}
+
+/// Choose the best forced-language fallback model from a model list. Pure and
+/// capability-driven so it is unit-testable and hardcodes no model ID: a model
+/// qualifies when it is downloaded, is a transcribe-cpp engine that accepts a
+/// forced language, is not the active primary, and advertises at least one of
+/// the candidate languages. The most accurate qualifier wins.
+fn choose_forced_language_fallback(
+    models: Vec<ModelInfo>,
+    active_model_id: &str,
+    candidates: &[String],
+) -> Option<ModelInfo> {
+    let candidate_bases: Vec<Option<String>> = candidates
+        .iter()
+        .map(|c| crate::keyboard_language::primary_subtag(c))
+        .collect();
+
+    let mut matches: Vec<ModelInfo> = models
+        .into_iter()
+        .filter(|model| {
+            model.id != active_model_id
+                && model.is_downloaded
+                && matches!(model.engine_type, EngineType::TranscribeCpp)
+                && model.supports_language_selection
+                && model.supported_languages.iter().any(|lang| {
+                    let base = crate::keyboard_language::primary_subtag(lang);
+                    candidate_bases.iter().any(|candidate| *candidate == base)
+                })
+        })
+        .collect();
+    matches.sort_by(|a, b| b.accuracy_score.total_cmp(&a.accuracy_score));
+    matches.into_iter().next()
 }
 
 struct TranscribeCppRunPlan {
@@ -1974,6 +2164,126 @@ mod tests {
 
     fn languages(codes: &[&str]) -> Vec<String> {
         codes.iter().map(|code| (*code).to_string()).collect()
+    }
+
+    fn fallback_model(
+        id: &str,
+        engine: EngineType,
+        is_downloaded: bool,
+        supports_language_selection: bool,
+        supported: &[&str],
+        accuracy: f32,
+    ) -> ModelInfo {
+        ModelInfo {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            filename: String::new(),
+            source: crate::managers::model::ModelSource::Local,
+            size_mb: 0,
+            is_downloaded,
+            is_downloading: false,
+            partial_size: 0,
+            is_directory: false,
+            engine_type: engine,
+            accuracy_score: accuracy,
+            speed_score: 0.0,
+            supports_translation: false,
+            is_recommended: false,
+            supported_languages: languages(supported),
+            supports_language_selection,
+            is_custom: false,
+            supports_streaming: false,
+            supports_language_detection: false,
+        }
+    }
+
+    #[test]
+    fn fallback_selection_requires_downloaded_forceable_matching_model() {
+        let candidates = languages(&["bg"]);
+        let models = vec![
+            // Auto-detect primary — excluded (it is the active model).
+            fallback_model("parakeet", EngineType::Parakeet, true, false, &["bg"], 0.9),
+            // Not downloaded — excluded.
+            fallback_model(
+                "absent",
+                EngineType::TranscribeCpp,
+                false,
+                true,
+                &["bg"],
+                0.9,
+            ),
+            // Cannot force a language — excluded.
+            fallback_model(
+                "autoonly",
+                EngineType::TranscribeCpp,
+                true,
+                false,
+                &["bg"],
+                0.9,
+            ),
+            // Does not support the candidate language — excluded.
+            fallback_model(
+                "fronly",
+                EngineType::TranscribeCpp,
+                true,
+                true,
+                &["fr"],
+                0.9,
+            ),
+            // Qualifies.
+            fallback_model(
+                "nemotron",
+                EngineType::TranscribeCpp,
+                true,
+                true,
+                &["bg-BG", "en"],
+                0.7,
+            ),
+        ];
+
+        let chosen = choose_forced_language_fallback(models, "parakeet", &candidates).map(|m| m.id);
+        assert_eq!(chosen.as_deref(), Some("nemotron"));
+    }
+
+    #[test]
+    fn fallback_selection_prefers_the_most_accurate_qualifier() {
+        let candidates = languages(&["de"]);
+        let models = vec![
+            fallback_model(
+                "cpp-low",
+                EngineType::TranscribeCpp,
+                true,
+                true,
+                &["de"],
+                0.5,
+            ),
+            fallback_model(
+                "cpp-high",
+                EngineType::TranscribeCpp,
+                true,
+                true,
+                &["de", "en"],
+                0.8,
+            ),
+        ];
+
+        let chosen = choose_forced_language_fallback(models, "parakeet", &candidates).map(|m| m.id);
+        assert_eq!(chosen.as_deref(), Some("cpp-high"));
+    }
+
+    #[test]
+    fn fallback_selection_returns_none_without_a_qualifier() {
+        let candidates = languages(&["bg"]);
+        let models = vec![fallback_model(
+            "fronly",
+            EngineType::TranscribeCpp,
+            true,
+            true,
+            &["fr"],
+            0.9,
+        )];
+        assert!(choose_forced_language_fallback(models, "parakeet", &candidates).is_none());
     }
 
     #[test]

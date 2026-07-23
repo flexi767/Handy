@@ -64,8 +64,6 @@ fn active_keyboard_language() -> Option<String> {
 /// The ordered, de-duplicated base language subtags represented by the user's
 /// enabled keyboard layouts, active layout first. Used by wrong-keyboard
 /// recovery to know which languages the user actually types in.
-// TODO(phase 2): consumed by wrong-keyboard Nemotron recovery, wired next.
-#[allow(dead_code)]
 pub fn enabled_keyboard_languages() -> Vec<String> {
     let mut languages = Vec::new();
     let mut push = |language: Option<String>| {
@@ -85,7 +83,7 @@ pub fn enabled_keyboard_languages() -> Vec<String> {
 
 /// Lowercase a BCP-47 tag and keep only its primary language subtag. Returns
 /// `None` for anything that is not a 2–3 letter language code.
-fn primary_subtag(language: &str) -> Option<String> {
+pub(crate) fn primary_subtag(language: &str) -> Option<String> {
     let primary = language.trim().replace('_', "-");
     let primary = primary.split('-').next()?.trim();
     if (2..=3).contains(&primary.len()) && primary.chars().all(|c| c.is_ascii_alphabetic()) {

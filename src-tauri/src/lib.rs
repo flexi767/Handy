@@ -10,6 +10,7 @@ mod commands;
 mod helpers;
 mod input;
 mod keyboard_language;
+mod language_validator;
 mod llm_client;
 mod managers;
 mod overlay;
