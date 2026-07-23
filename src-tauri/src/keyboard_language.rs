@@ -61,9 +61,31 @@ fn active_keyboard_language() -> Option<String> {
     current_keyboard_input_source().and_then(|source| source.primary_language())
 }
 
+/// Like [`enabled_keyboard_languages`], but guaranteed to run the Carbon
+/// input-source *enumeration* on the main dispatch queue. `TISCreateInputSourceList`
+/// calls `dispatch_assert_queue(dispatch_get_main_queue())` and aborts the
+/// process on any other queue, and callers such as `transcribe` run on a
+/// `spawn_blocking` worker — so hop onto the real main queue via libdispatch and
+/// block for the result. Safe from any non-main thread: the main run loop
+/// services the main queue, so this cannot deadlock.
+#[cfg(target_os = "macos")]
+pub fn enabled_keyboard_languages_on_main() -> Vec<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    dispatch::Queue::main().exec_async(move || {
+        let _ = tx.send(enabled_keyboard_languages());
+    });
+    rx.recv().unwrap_or_default()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn enabled_keyboard_languages_on_main() -> Vec<String> {
+    enabled_keyboard_languages()
+}
+
 /// The ordered, de-duplicated base language subtags represented by the user's
 /// enabled keyboard layouts, active layout first. Used by wrong-keyboard
-/// recovery to know which languages the user actually types in.
+/// recovery to know which languages the user actually types in. Must run on the
+/// main dispatch queue on macOS (see [`enabled_keyboard_languages_on_main`]).
 pub fn enabled_keyboard_languages() -> Vec<String> {
     let mut languages = Vec::new();
     let mut push = |language: Option<String>| {

@@ -2453,6 +2453,7 @@ dependencies = [
  "chrono",
  "clap",
  "cpal",
+ "dispatch",
  "enigo",
  "env_filter",
  "ferrous-opencc",
