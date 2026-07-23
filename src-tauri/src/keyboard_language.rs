@@ -37,6 +37,27 @@ impl KeyboardInputSource {
     }
 }
 
+/// Resolve a persisted `selected_language` for one recording against a specific
+/// model's capabilities.
+///
+/// Keyboard-following means "transcribe whichever of my keyboard languages I am
+/// speaking", not "assume I am speaking the layout that happens to be active".
+/// Forcing the active layout is actively harmful when it does not match the
+/// speech: Whisper *translates* into the forced language rather than
+/// transcribing. So a model that can auto-detect is left on `"auto"`, and the
+/// result is constrained to the enabled keyboard languages afterwards by
+/// wrong-language recovery. Only a must-pick model (no detection) falls back to
+/// forcing the active layout, since it has to be told something.
+pub fn resolve_language_intent_for_model(
+    persisted_language: &str,
+    supports_language_detection: bool,
+) -> String {
+    if persisted_language == FOLLOW_KEYBOARD_LANGUAGE && supports_language_detection {
+        return "auto".to_string();
+    }
+    resolve_language_intent(persisted_language)
+}
+
 /// Resolve a persisted `selected_language` for one recording. Concrete choices
 /// (including `"auto"`) pass through untouched; [`FOLLOW_KEYBOARD_LANGUAGE`]
 /// snapshots the active keyboard and resolves to its base language subtag, or
@@ -367,6 +388,37 @@ mod tests {
         assert_eq!(resolve_language_intent("auto"), "auto");
         assert_eq!(resolve_language_intent("de-DE"), "de-DE");
         assert_eq!(resolve_language_intent("en"), "en");
+    }
+
+    #[test]
+    fn keyboard_following_prefers_auto_detection_over_the_active_layout() {
+        // A detection-capable model must not be forced to the active layout:
+        // forcing a language the speech is not in makes Whisper translate
+        // instead of transcribe. Constraining to the user's keyboard languages
+        // happens afterwards, in wrong-language recovery.
+        assert_eq!(
+            resolve_language_intent_for_model(FOLLOW_KEYBOARD_LANGUAGE, true),
+            "auto"
+        );
+    }
+
+    #[test]
+    fn explicit_choices_are_still_forced_even_when_detection_exists() {
+        for language in ["auto", "bg", "de-DE"] {
+            assert_eq!(resolve_language_intent_for_model(language, true), language);
+            assert_eq!(resolve_language_intent_for_model(language, false), language);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn must_pick_models_still_fall_back_to_the_keyboard_layout() {
+        // Without detection the engine has to be told something, so keyboard
+        // following resolves to a concrete language (auto off-macOS).
+        assert_eq!(
+            resolve_language_intent_for_model(FOLLOW_KEYBOARD_LANGUAGE, false),
+            "auto"
+        );
     }
 
     #[cfg(not(target_os = "macos"))]
