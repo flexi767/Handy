@@ -70,6 +70,17 @@ fn active_keyboard_language() -> Option<String> {
 /// services the main queue, so this cannot deadlock.
 #[cfg(target_os = "macos")]
 pub fn enabled_keyboard_languages_on_main() -> Vec<String> {
+    extern "C" {
+        fn pthread_main_np() -> std::os::raw::c_int;
+    }
+
+    // Already on the main thread (e.g. the headless CLI transcribe path): the
+    // enumeration is safe to run directly, and dispatching to the main queue
+    // while blocking here would deadlock when no run loop is draining it.
+    if unsafe { pthread_main_np() } != 0 {
+        return enabled_keyboard_languages();
+    }
+
     let (tx, rx) = std::sync::mpsc::channel();
     dispatch::Queue::main().exec_async(move || {
         let _ = tx.send(enabled_keyboard_languages());
