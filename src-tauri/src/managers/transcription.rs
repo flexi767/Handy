@@ -1126,12 +1126,6 @@ impl TranscriptionManager {
         )
     }
 
-    /// Follow-keyboard recovery. When an auto-detecting primary model returns a
-    /// language the user does not type, retry the retained audio through a
-    /// forced-language fallback model, trying each enabled-keyboard language
-    /// (active first). Returns the first usable, non-conflicting transcript, or
-    /// `None` to keep the original. The user's selected/cached primary model is
-    /// never replaced.
     /// Retry the retained audio on the *already loaded* primary model with the
     /// language forced. This is the best first move when it applies: it is the
     /// model the user chose, it is already in memory (no second load), and
@@ -1209,6 +1203,12 @@ impl TranscriptionManager {
         recovered
     }
 
+    /// Follow-keyboard recovery. When the primary returns a language the user
+    /// does not type, retry the retained audio with each enabled keyboard
+    /// language forced — on the loaded primary when it accepts a language, and
+    /// otherwise on a downloaded forced-language model. Returns the first
+    /// usable, non-conflicting transcript, or `None` to keep the original. The
+    /// user's selected model is never replaced.
     fn recover_follow_keyboard_language(
         &self,
         audio: &[f32],
@@ -1332,11 +1332,14 @@ impl TranscriptionManager {
             return primary_text;
         }
 
+        // Retry order matters: English must come last so a forced-English pass
+        // cannot translate over a correct result from another candidate.
+        let ordered = order_recovery_candidates(&candidates);
         warn!(
-            "Follow-keyboard: primary transcript conflicts with enabled keyboards {:?}; attempting recovery",
-            candidates
+            "Follow-keyboard: primary transcript conflicts with enabled keyboards {:?}; attempting recovery in order {:?}",
+            candidates, ordered
         );
-        self.recover_follow_keyboard_language(audio, &candidates, active_model_id, settings)
+        self.recover_follow_keyboard_language(audio, &ordered, active_model_id, settings)
             .unwrap_or_else(|| {
                 warn!(
                     "Follow-keyboard recovery found no validated transcript; keeping the original"
@@ -1821,6 +1824,29 @@ fn effective_language_for_model(
     }
 }
 
+/// Order recovery candidates so English is tried last.
+///
+/// English is Whisper's translation target: the `language` token tells the
+/// decoder which language to emit, so forcing `en` on non-English audio yields
+/// fluent English rather than a transcription — and that English then passes
+/// validation, masking a correct result from another candidate. The model's own
+/// detection argues the same way: had the speech been English, auto-detect would
+/// have said so instead of picking a language the user does not type. English
+/// stays reachable as a last resort, for short or noisy clips where detection
+/// mis-fires on genuinely English speech.
+fn order_recovery_candidates(candidates: &[String]) -> Vec<String> {
+    let is_english = |language: &String| {
+        crate::keyboard_language::primary_subtag(language).as_deref() == Some("en")
+    };
+    let mut ordered: Vec<String> = candidates
+        .iter()
+        .filter(|c| !is_english(c))
+        .cloned()
+        .collect();
+    ordered.extend(candidates.iter().filter(|c| is_english(c)).cloned());
+    ordered
+}
+
 /// Choose the best forced-language fallback model from a model list. Pure and
 /// capability-driven so it is unit-testable and hardcodes no model ID: a model
 /// qualifies when it is downloaded, is a transcribe-cpp engine that accepts a
@@ -2289,6 +2315,36 @@ mod tests {
             supports_streaming: false,
             supports_language_detection: false,
         }
+    }
+
+    #[test]
+    fn recovery_tries_english_last_but_keeps_it_reachable() {
+        // Forcing English on non-English audio yields a translation that always
+        // validates, so it must never pre-empt another candidate — while still
+        // remaining available as a last resort.
+        assert_eq!(
+            order_recovery_candidates(&languages(&["en", "de", "bg"])),
+            languages(&["de", "bg", "en"])
+        );
+        assert_eq!(
+            order_recovery_candidates(&languages(&["bg", "en"])),
+            languages(&["bg", "en"])
+        );
+    }
+
+    #[test]
+    fn recovery_order_preserves_non_english_priority_and_full_set() {
+        // Non-English candidates keep their existing (active-keyboard-first)
+        // order, and no candidate is ever dropped.
+        assert_eq!(
+            order_recovery_candidates(&languages(&["de", "bg", "fr"])),
+            languages(&["de", "bg", "fr"])
+        );
+        assert_eq!(
+            order_recovery_candidates(&languages(&["en"])),
+            languages(&["en"])
+        );
+        assert!(order_recovery_candidates(&[]).is_empty());
     }
 
     #[test]
