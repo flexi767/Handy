@@ -1,8 +1,17 @@
 use rustfft::{num_complex::Complex32, Fft, FftPlanner};
 use std::sync::Arc;
 
-const DB_MIN: f32 = -55.0;
-const DB_MAX: f32 = -8.0;
+// Dynamic range, in dB, above each band's adaptively-tracked noise floor that
+// maps to a full-height bar. This is a perceptual span, not a microphone
+// calibration: the floor itself tracks whatever "silence" is for the current
+// mic, so a quiet built-in mic and a hot external one animate the same without
+// any fixed sensitivity threshold.
+const DB_RANGE_ABOVE_FLOOR: f32 = 45.0;
+// The per-band noise floor falls quickly toward a newly-observed quiet level
+// (so a fresh or quiet mic calibrates within a fraction of a second) and rises
+// only very slowly (so sustained speech never drags it up).
+const FLOOR_ATTACK: f32 = 0.2;
+const FLOOR_RELEASE: f32 = 0.001;
 const GAIN: f32 = 1.3;
 const CURVE_POWER: f32 = 0.7;
 
@@ -125,15 +134,20 @@ impl AudioVisualiser {
                 -80.0 // Very low floor for zero power
             };
 
-            // Only update noise floor when signal is quiet (below current floor + 10dB)
-            if db < self.noise_floor[bucket_idx] + 10.0 {
-                const NOISE_ALPHA: f32 = 0.001; // Very slow adaptation
-                self.noise_floor[bucket_idx] =
-                    NOISE_ALPHA * db + (1.0 - NOISE_ALPHA) * self.noise_floor[bucket_idx];
+            // Track the per-band noise floor: adopt a new quiet minimum quickly,
+            // drift up slowly, and leave it untouched on loud (speech) frames
+            // more than 10 dB above the floor so speech never raises it.
+            let floor = self.noise_floor[bucket_idx];
+            if db < floor {
+                self.noise_floor[bucket_idx] = FLOOR_ATTACK * db + (1.0 - FLOOR_ATTACK) * floor;
+            } else if db < floor + 10.0 {
+                self.noise_floor[bucket_idx] = FLOOR_RELEASE * db + (1.0 - FLOOR_RELEASE) * floor;
             }
 
-            // Map configurable dB range to 0-1 with gain and curve shaping
-            let normalized = ((db - DB_MIN) / (DB_MAX - DB_MIN)).clamp(0.0, 1.0);
+            // Normalize relative to this band's own noise floor — no fixed
+            // sensitivity threshold — then apply gain and curve shaping.
+            let normalized =
+                ((db - self.noise_floor[bucket_idx]) / DB_RANGE_ABOVE_FLOOR).clamp(0.0, 1.0);
             buckets[bucket_idx] = (normalized * GAIN).powf(CURVE_POWER).clamp(0.0, 1.0);
         }
 
@@ -152,5 +166,80 @@ impl AudioVisualiser {
         self.buffer.clear();
         // Reset noise floor to initial values
         self.noise_floor.fill(-40.0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioVisualiser;
+
+    fn tone(samples: usize, freq: f32, sample_rate: f32, amplitude: f32) -> Vec<f32> {
+        (0..samples)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate).sin() * amplitude)
+            .collect()
+    }
+
+    #[test]
+    fn silence_stays_flat() {
+        let mut vis = AudioVisualiser::new(48_000, 2_048, 16, 400.0, 4_000.0);
+        let levels = vis.feed(&vec![0.0; 2_048]).unwrap();
+        assert!(
+            levels.iter().all(|l| *l == 0.0),
+            "silence moved: {levels:?}"
+        );
+    }
+
+    #[test]
+    fn quiet_speech_shows_above_calibrated_silence() {
+        // The realistic case that fixed thresholds broke on a soft built-in mic:
+        // the floor calibrates to true silence, then a quiet speech-level tone
+        // must register clear movement above it — with no fixed sensitivity
+        // constant. (A sustained tone with no pauses is intentionally absorbed
+        // into the floor; real speech varies and keeps showing.)
+        let mut vis = AudioVisualiser::new(48_000, 2_048, 16, 400.0, 4_000.0);
+        for _ in 0..30 {
+            let _ = vis.feed(&vec![0.0; 2_048]);
+        }
+        let samples = tone(2_048, 1_000.0, 48_000.0, 0.02);
+        let peak = vis
+            .feed(&samples)
+            .unwrap()
+            .iter()
+            .copied()
+            .fold(0.0_f32, f32::max);
+        assert!(peak > 0.2, "quiet speech didn't show above silence: {peak}");
+    }
+
+    #[test]
+    fn louder_input_reads_higher_than_quieter_input() {
+        // Relative-to-floor normalization must still preserve loudness ordering.
+        let mut quiet_vis = AudioVisualiser::new(48_000, 2_048, 16, 400.0, 4_000.0);
+        let mut loud_vis = AudioVisualiser::new(48_000, 2_048, 16, 400.0, 4_000.0);
+        let quiet = tone(2_048, 1_000.0, 48_000.0, 0.01);
+        let loud = tone(2_048, 1_000.0, 48_000.0, 0.2);
+        let mut quiet_peak: f32 = 0.0;
+        let mut loud_peak: f32 = 0.0;
+        for _ in 0..10 {
+            quiet_peak = quiet_peak.max(
+                quiet_vis
+                    .feed(&quiet)
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .fold(0.0, f32::max),
+            );
+            loud_peak = loud_peak.max(
+                loud_vis
+                    .feed(&loud)
+                    .unwrap()
+                    .iter()
+                    .copied()
+                    .fold(0.0, f32::max),
+            );
+        }
+        assert!(
+            loud_peak > quiet_peak,
+            "louder input did not read higher: loud={loud_peak} quiet={quiet_peak}"
+        );
     }
 }
