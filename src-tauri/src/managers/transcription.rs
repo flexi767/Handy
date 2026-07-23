@@ -1159,6 +1159,15 @@ impl TranscriptionManager {
         let mut recovered = None;
         if let LoadedEngine::TranscribeCpp(session) = &mut engine {
             let model_languages = session.model().capabilities().languages.clone();
+            // Same context-bleed guard as the primary path, and for the same
+            // reason: these retries reuse the cached session. Only the whisper
+            // family accepts the extension.
+            let family = (session.model().arch() == "whisper").then(|| {
+                RunExtension::Whisper(WhisperRunOptions {
+                    condition_on_prev_tokens: Some(false),
+                    ..Default::default()
+                })
+            });
             for candidate in candidates {
                 let candidate_base = crate::keyboard_language::primary_subtag(candidate);
                 let Some(forced_language) = model_languages.iter().find(|language| {
@@ -1169,6 +1178,7 @@ impl TranscriptionManager {
                 let run_options = RunOptions {
                     task: Task::Transcribe,
                     language: Some(forced_language.clone()),
+                    family: family.clone(),
                     ..Default::default()
                 };
                 info!(
@@ -1470,19 +1480,29 @@ impl TranscriptionManager {
             let transcribe_result = catch_unwind(AssertUnwindSafe(|| -> Result<String> {
                 match &mut engine {
                     LoadedEngine::TranscribeCpp(session) => {
-                        // Custom words become the initial prompt ONLY for models
-                        // that accept one (whisper family). Attaching the
-                        // whisper run extension to a non-whisper arch is rejected
-                        // with INVALID_ARG, so skip it there and let the fuzzy
-                        // post-correction handle custom words instead.
-                        let family = if settings.custom_words.is_empty() || !model_is_whisper {
-                            None
-                        } else {
-                            Some(RunExtension::Whisper(WhisperRunOptions {
-                                initial_prompt: Some(settings.custom_words.join(", ")),
+                        // Whisper decode knobs. Only the whisper family accepts
+                        // this extension — other archs reject it with
+                        // INVALID_ARG — so it is attached by arch, not by
+                        // whether custom words happen to be set.
+                        //
+                        // `condition_on_prev_tokens` is disabled so one dictation
+                        // cannot seed the next. The session is cached across
+                        // recordings, and with conditioning on, a clip too short
+                        // to constrain the decoder gets completed from the
+                        // previous transcript's context instead of from the
+                        // audio — which is how "just this" came back as an
+                        // unrelated German farewell after an earlier German one.
+                        //
+                        // Custom words still become the initial prompt; models
+                        // that get no prompt fall back to fuzzy post-correction.
+                        let family = model_is_whisper.then(|| {
+                            RunExtension::Whisper(WhisperRunOptions {
+                                initial_prompt: (!settings.custom_words.is_empty())
+                                    .then(|| settings.custom_words.join(", ")),
+                                condition_on_prev_tokens: Some(false),
                                 ..Default::default()
-                            }))
-                        };
+                            })
+                        });
 
                         let run_plan = transcribe_cpp_run_plan(
                             settings.translate_to_english,
