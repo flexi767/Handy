@@ -1212,6 +1212,29 @@ impl TranscriptionManager {
         None
     }
 
+    /// Snapshot the enabled keyboard languages on the main thread. Carbon's
+    /// input-source *enumeration* (`TISCreateInputSourceList`) asserts the main
+    /// dispatch queue and aborts the process if called elsewhere, and
+    /// `transcribe` always runs on a `spawn_blocking` worker — so marshal the
+    /// call to the main run loop and block for the result. (The single
+    /// current-source lookup used for routing does not enumerate and is safe off
+    /// the main thread.)
+    fn enabled_keyboard_languages_on_main(&self) -> Vec<String> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        match self.app_handle.run_on_main_thread(move || {
+            let _ = tx.send(crate::keyboard_language::enabled_keyboard_languages());
+        }) {
+            Ok(()) => rx.recv().unwrap_or_default(),
+            Err(error) => {
+                warn!(
+                    "Could not read keyboard languages on the main thread: {}",
+                    error
+                );
+                Vec::new()
+            }
+        }
+    }
+
     /// Gate and run [`Self::recover_follow_keyboard_language`]. No-op unless the
     /// user routes by keyboard, the active model auto-detects, and the primary
     /// transcript conflicts with the languages the user types.
@@ -1234,7 +1257,7 @@ impl TranscriptionManager {
         if !auto_detects {
             return primary_text;
         }
-        let candidates = crate::keyboard_language::enabled_keyboard_languages();
+        let candidates = self.enabled_keyboard_languages_on_main();
         if candidates.is_empty()
             || !crate::language_validator::transcript_conflicts_with_candidates(
                 &primary_text,
