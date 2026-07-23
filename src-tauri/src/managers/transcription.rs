@@ -1132,6 +1132,83 @@ impl TranscriptionManager {
     /// (active first). Returns the first usable, non-conflicting transcript, or
     /// `None` to keep the original. The user's selected/cached primary model is
     /// never replaced.
+    /// Retry the retained audio on the *already loaded* primary model with the
+    /// language forced. This is the best first move when it applies: it is the
+    /// model the user chose, it is already in memory (no second load), and
+    /// forcing a language is a genuinely different run from the auto-detect that
+    /// just produced the wrong language.
+    ///
+    /// Returns `None` when the primary cannot be told a language at all — a
+    /// detect-only engine would simply repeat the result that already failed, so
+    /// rotating languages within it is pointless.
+    fn retry_loaded_primary_with_forced_language(
+        &self,
+        audio: &[f32],
+        candidates: &[String],
+        active_model_id: &str,
+        settings: &AppSettings,
+    ) -> Option<String> {
+        if !self
+            .model_manager
+            .get_model_info(active_model_id)
+            .is_some_and(|info| info.supports_language_selection)
+        {
+            return None;
+        }
+
+        // Borrow the cached engine the same way the main path does, so it is
+        // always handed back even when no candidate validates.
+        let mut engine_guard = self.lock_engine();
+        let mut engine = engine_guard.take()?;
+        drop(engine_guard);
+
+        let mut recovered = None;
+        if let LoadedEngine::TranscribeCpp(session) = &mut engine {
+            let model_languages = session.model().capabilities().languages.clone();
+            for candidate in candidates {
+                let candidate_base = crate::keyboard_language::primary_subtag(candidate);
+                let Some(forced_language) = model_languages.iter().find(|language| {
+                    crate::keyboard_language::primary_subtag(language) == candidate_base
+                }) else {
+                    continue;
+                };
+                let run_options = RunOptions {
+                    task: Task::Transcribe,
+                    language: Some(forced_language.clone()),
+                    ..Default::default()
+                };
+                info!(
+                    "Follow-keyboard recovery retrying on the loaded primary forced to '{}' ('{}')",
+                    candidate, forced_language
+                );
+                let text = match session.run(audio, &run_options) {
+                    Ok(transcription) => {
+                        post_process_transcription_text(transcription.text, settings, false)
+                    }
+                    Err(error) => {
+                        warn!("Primary forced '{}' run failed: {}", candidate, error);
+                        continue;
+                    }
+                };
+                if !text.trim().is_empty()
+                    && !crate::language_validator::transcript_conflicts_with_candidates(
+                        &text, candidates,
+                    )
+                {
+                    info!(
+                        "Follow-keyboard recovery accepted primary forced '{}'",
+                        candidate
+                    );
+                    recovered = Some(text);
+                    break;
+                }
+            }
+        }
+
+        self.return_engine(engine, active_model_id);
+        recovered
+    }
+
     fn recover_follow_keyboard_language(
         &self,
         audio: &[f32],
@@ -1139,6 +1216,18 @@ impl TranscriptionManager {
         active_model_id: &str,
         settings: &AppSettings,
     ) -> Option<String> {
+        // Prefer the loaded primary when it accepts a forced language: it is
+        // already in memory and is the model the user picked. Only fall through
+        // to a different model when the primary cannot be forced at all.
+        if let Some(text) = self.retry_loaded_primary_with_forced_language(
+            audio,
+            candidates,
+            active_model_id,
+            settings,
+        ) {
+            return Some(text);
+        }
+
         let fallback = self.select_forced_language_fallback(active_model_id, candidates)?;
         let model_path = self
             .model_manager
