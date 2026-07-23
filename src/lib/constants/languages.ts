@@ -4,6 +4,16 @@ export interface Language {
 }
 
 export const CHINESE_LANGUAGE_CODE = "zh";
+// Persisted `selected_language` sentinel: resolve the language from the active
+// keyboard layout at recording time. macOS-only; other platforms fall back to
+// auto-detect (see keyboard_language.rs). Must match FOLLOW_KEYBOARD_LANGUAGE
+// in the backend.
+export const FOLLOW_KEYBOARD_LANGUAGE = "follow_keyboard";
+
+export const FOLLOW_KEYBOARD_LANGUAGE_OPTION: Language = {
+  value: FOLLOW_KEYBOARD_LANGUAGE,
+  label: "Follow Keyboard Language",
+};
 
 export const LANGUAGES: Language[] = [
   { value: "auto", label: "Auto Detect" },
@@ -114,7 +124,9 @@ export const LANGUAGES: Language[] = [
 const CHINESE_OUTPUT_INTENTS = new Set(["zh-Hans", "zh-Hant"]);
 
 const LANGUAGE_LABELS = new Map(
-  LANGUAGES.map((language) => [language.value, language.label] as const),
+  [...LANGUAGES, FOLLOW_KEYBOARD_LANGUAGE_OPTION].map(
+    (language) => [language.value, language.label] as const,
+  ),
 );
 
 export const MODEL_CAPABILITY_LANGUAGES: Language[] = LANGUAGES.filter(

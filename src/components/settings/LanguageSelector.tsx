@@ -3,9 +3,12 @@ import { useTranslation } from "react-i18next";
 import { SettingContainer } from "../ui/SettingContainer";
 import { ResetButton } from "../ui/ResetButton";
 import { useSettings } from "../../hooks/useSettings";
+import { useOsType } from "../../hooks/useOsType";
 import {
   getLanguageLabel,
   recognitionLanguage,
+  FOLLOW_KEYBOARD_LANGUAGE,
+  FOLLOW_KEYBOARD_LANGUAGE_OPTION,
   SELECTABLE_LANGUAGES,
   supportsLanguageCode,
 } from "../../lib/constants/languages";
@@ -30,6 +33,9 @@ const effectiveLanguage = (
   supported: string[],
   supportsDetection: boolean,
 ): string => {
+  // Keyboard-following resolves to a concrete locale only at recording time, so
+  // it always displays as itself.
+  if (intent === FOLLOW_KEYBOARD_LANGUAGE) return intent;
   if (supported.length === 0) return intent;
   if (intent !== "auto" && supportsLanguageCode(supported, intent))
     return intent;
@@ -45,6 +51,7 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
   supportsLanguageDetection = true,
 }) => {
   const { t } = useTranslation();
+  const osType = useOsType();
   const { getSetting, updateSetting, resetSetting, isUpdating } = useSettings();
   const [isOpen, setIsOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -84,14 +91,22 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
   }, [isOpen]);
 
   const availableLanguages = useMemo(() => {
-    if (!supportedLanguages || supportedLanguages.length === 0)
-      return SELECTABLE_LANGUAGES;
-    return SELECTABLE_LANGUAGES.filter((lang) =>
-      lang.value === "auto"
-        ? supportsLanguageDetection
-        : supportsLanguageCode(supportedLanguages, lang.value),
-    );
-  }, [supportedLanguages, supportsLanguageDetection]);
+    const selectable =
+      !supportedLanguages || supportedLanguages.length === 0
+        ? SELECTABLE_LANGUAGES
+        : SELECTABLE_LANGUAGES.filter((lang) =>
+            lang.value === "auto"
+              ? supportsLanguageDetection
+              : supportsLanguageCode(supportedLanguages, lang.value),
+          );
+    // Keyboard-following is macOS-only (the backend resolves it via the active
+    // input source and no-ops elsewhere), so only offer it there. It resolves
+    // to a concrete language at recording time, so it is always available
+    // regardless of the current model's supported set.
+    return osType === "macos"
+      ? [FOLLOW_KEYBOARD_LANGUAGE_OPTION, ...selectable]
+      : selectable;
+  }, [supportedLanguages, supportsLanguageDetection, osType]);
 
   const filteredLanguages = useMemo(
     () =>

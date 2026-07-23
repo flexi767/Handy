@@ -1559,13 +1559,14 @@ fn effective_language_for_model(
     model_manager: &ModelManager,
     model_id: &str,
 ) -> String {
+    let intent = crate::keyboard_language::resolve_language_intent(&settings.selected_language);
     match model_manager.get_model_info(model_id) {
         Some(info) => crate::managers::model::effective_language(
-            &settings.selected_language,
+            &intent,
             &info.supported_languages,
             info.supports_language_detection,
         ),
-        None => settings.selected_language.clone(),
+        None => intent,
     }
 }
 

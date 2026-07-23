@@ -404,13 +404,14 @@ fn resolve_effective_language(app: &AppHandle, settings: &AppSettings) -> String
     let active_model = tm
         .get_current_model()
         .unwrap_or_else(|| settings.selected_model.clone());
+    let intent = crate::keyboard_language::resolve_language_intent(&settings.selected_language);
     match model_manager.get_model_info(&active_model) {
         Some(info) => crate::managers::model::effective_language(
-            &settings.selected_language,
+            &intent,
             &info.supported_languages,
             info.supports_language_detection,
         ),
-        None => settings.selected_language.clone(),
+        None => intent,
     }
 }
 
