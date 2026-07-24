@@ -406,9 +406,13 @@ fn resolve_effective_language(app: &AppHandle, settings: &AppSettings) -> String
         .unwrap_or_else(|| settings.selected_model.clone());
     match model_manager.get_model_info(&active_model) {
         Some(info) => {
+            // Post-processing resolves the language only as a hint for the LLM
+            // cleanup prompt, with no clip in hand, so it always uses the
+            // long-clip (auto-detect) resolution.
             let intent = crate::keyboard_language::resolve_language_intent_for_model(
                 &settings.selected_language,
                 info.supports_language_detection,
+                false,
             );
             crate::managers::model::effective_language(
                 &intent,

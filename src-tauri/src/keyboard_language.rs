@@ -51,8 +51,16 @@ impl KeyboardInputSource {
 pub fn resolve_language_intent_for_model(
     persisted_language: &str,
     supports_language_detection: bool,
+    prefer_active_layout: bool,
 ) -> String {
-    if persisted_language == FOLLOW_KEYBOARD_LANGUAGE && supports_language_detection {
+    // On a clip too short for reliable auto-detection, the active keyboard is a
+    // stronger signal than a one-second guess, so force it even on a
+    // detection-capable model. Longer clips keep auto-detect (the caller passes
+    // `prefer_active_layout = false`), which recovery then constrains.
+    if persisted_language == FOLLOW_KEYBOARD_LANGUAGE
+        && supports_language_detection
+        && !prefer_active_layout
+    {
         return "auto".to_string();
     }
     resolve_language_intent(persisted_language)
@@ -391,32 +399,42 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_following_prefers_auto_detection_over_the_active_layout() {
-        // A detection-capable model must not be forced to the active layout:
-        // forcing a language the speech is not in makes Whisper translate
-        // instead of transcribe. Constraining to the user's keyboard languages
-        // happens afterwards, in wrong-language recovery.
+    fn long_clips_prefer_auto_detection_over_the_active_layout() {
+        // On a long clip (prefer_active_layout = false) a detection-capable
+        // model must not be forced to the active layout: forcing a language the
+        // speech is not in makes Whisper translate instead of transcribe.
         assert_eq!(
-            resolve_language_intent_for_model(FOLLOW_KEYBOARD_LANGUAGE, true),
+            resolve_language_intent_for_model(FOLLOW_KEYBOARD_LANGUAGE, true, false),
             "auto"
         );
     }
 
     #[test]
-    fn explicit_choices_are_still_forced_even_when_detection_exists() {
+    fn explicit_choices_are_still_forced_regardless_of_clip_length() {
         for language in ["auto", "bg", "de-DE"] {
-            assert_eq!(resolve_language_intent_for_model(language, true), language);
-            assert_eq!(resolve_language_intent_for_model(language, false), language);
+            for detects in [true, false] {
+                for short in [true, false] {
+                    assert_eq!(
+                        resolve_language_intent_for_model(language, detects, short),
+                        language
+                    );
+                }
+            }
         }
     }
 
     #[cfg(not(target_os = "macos"))]
     #[test]
-    fn must_pick_models_still_fall_back_to_the_keyboard_layout() {
-        // Without detection the engine has to be told something, so keyboard
-        // following resolves to a concrete language (auto off-macOS).
+    fn short_clips_and_must_pick_models_fall_back_to_the_layout() {
+        // Short clip: force the active layout even on a detection-capable model
+        // (auto off-macOS, where there is no keyboard to read).
         assert_eq!(
-            resolve_language_intent_for_model(FOLLOW_KEYBOARD_LANGUAGE, false),
+            resolve_language_intent_for_model(FOLLOW_KEYBOARD_LANGUAGE, true, true),
+            "auto"
+        );
+        // Must-pick model: has to be told a language regardless of clip length.
+        assert_eq!(
+            resolve_language_intent_for_model(FOLLOW_KEYBOARD_LANGUAGE, false, false),
             "auto"
         );
     }

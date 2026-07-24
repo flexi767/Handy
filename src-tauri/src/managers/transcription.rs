@@ -36,6 +36,10 @@ use transcribe_rs::{
 const STREAM_PERF_LOG_INTERVAL: Duration = Duration::from_secs(5);
 const STREAM_FINALIZE_REPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Below this much retained audio, auto-detection is unreliable, so
+/// keyboard-following forces the active layout's language instead of guessing.
+const SHORT_CLIP_FORCE_KEYBOARD_SECS: f64 = 1.5;
+
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_string()
@@ -890,10 +894,12 @@ impl TranscriptionManager {
         }
 
         // Build run options mirroring the offline transcribe-cpp path: task +
-        // language gated against what the model actually advertises.
+        // language gated against what the model actually advertises. Streaming
+        // has no fixed clip length, so it always uses auto-detect (no
+        // short-clip keyboard forcing).
         let settings = get_settings(&self.app_handle);
         let effective_language =
-            effective_language_for_model(&settings, self.model_manager.as_ref(), &model_id);
+            effective_language_for_model(&settings, self.model_manager.as_ref(), &model_id, false);
         let run_plan = transcribe_cpp_run_plan(
             settings.translate_to_english,
             &effective_language,
@@ -1410,8 +1416,17 @@ impl TranscriptionManager {
         // will actually use. The coercion is capability-aware (a must-pick model
         // never receives "auto") and computed fresh here — it is never written
         // back to settings, so the intent survives switching models and back.
-        let validated_language =
-            effective_language_for_model(&settings, self.model_manager.as_ref(), &active_model);
+        //
+        // On a very short clip, keyboard-following forces the active layout
+        // rather than trusting auto-detection, which is unreliable on so little
+        // audio (a one-second "работи" gets guessed as Italian).
+        let short_clip = (audio_len as f64 / 16_000.0) < SHORT_CLIP_FORCE_KEYBOARD_SECS;
+        let validated_language = effective_language_for_model(
+            &settings,
+            self.model_manager.as_ref(),
+            &active_model,
+            short_clip,
+        );
         if validated_language != settings.selected_language {
             debug!(
                 "Language intent '{}' resolved to '{}' for model '{}'",
@@ -1827,12 +1842,14 @@ fn effective_language_for_model(
     settings: &AppSettings,
     model_manager: &ModelManager,
     model_id: &str,
+    prefer_active_layout: bool,
 ) -> String {
     match model_manager.get_model_info(model_id) {
         Some(info) => {
             let intent = crate::keyboard_language::resolve_language_intent_for_model(
                 &settings.selected_language,
                 info.supports_language_detection,
+                prefer_active_layout,
             );
             crate::managers::model::effective_language(
                 &intent,
