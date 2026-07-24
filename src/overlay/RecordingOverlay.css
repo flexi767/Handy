@@ -242,6 +242,7 @@
 /* base row — dot (left) | waveform (center) | timer + cancel (right).
    Same structure for pill & panel; the dot stays anchored left in both. */
 .sbase {
+  position: relative;
   height: var(--ov-base-h);
   padding: 0 10px;
   display: grid;
@@ -308,15 +309,21 @@
   background: var(--s-accent);
   transition: height 80ms linear;
 }
-/* Two-letter active-keyboard-language code shown in front of the waveform. */
+/* Two-letter active-keyboard-language code, anchored just right of the dot.
+   Absolutely positioned so it stays out of the grid flow and never resizes the
+   centered waveform column. The dot spans ~15–22px (10px .sbase pad + 5px
+   .sbase-l pad + 7px dot), so 26px places the code just past it. */
 .slang {
-  margin-right: 4px;
+  position: absolute;
+  left: 26px;
+  top: 50%;
+  transform: translateY(-50%);
   font-size: 10px;
   font-weight: 650;
   line-height: 1;
   letter-spacing: 0.04em;
   color: var(--s-muted);
-  flex: none;
+  pointer-events: none;
   font-variant-numeric: tabular-nums;
 }
 .sx {

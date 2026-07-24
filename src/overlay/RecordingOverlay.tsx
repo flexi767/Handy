@@ -163,7 +163,6 @@ const RecordingOverlay: React.FC = () => {
   // ---- Shared building blocks (one visual language for every overlay form) ----
   const waveform = (
     <div className="swave">
-      {language && <span className="slang">{language}</span>}
       {levels.map((v, i) => (
         <i
           key={i}
@@ -199,6 +198,9 @@ const RecordingOverlay: React.FC = () => {
       <div className="sbase-l">
         <span className="sdot" />
       </div>
+      {/* Anchored beside the dot and taken out of the grid flow so it never
+          shrinks the centered waveform column. */}
+      {language && <span className="slang">{language}</span>}
       {waveform}
       <div className="sbase-r">
         {showTimer && <span className="stimer">{fmtTime(elapsed)}</span>}
