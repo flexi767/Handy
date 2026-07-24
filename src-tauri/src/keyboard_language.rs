@@ -91,38 +91,58 @@ fn active_keyboard_language() -> Option<String> {
 }
 
 /// The active keyboard layout's language as an uppercase display code
-/// (e.g. `"EN"`, `"BG"`), or `None` when no layout maps to a language. Reads only
-/// the current input source, so it is safe off the main thread (unlike the
-/// enabled-list enumeration).
+/// (e.g. `"EN"`, `"BG"`), or `None` when no layout maps to a language. Reads the
+/// current input source on the main dispatch queue (see [`run_on_main`]), so it
+/// is safe to call from any thread.
 pub fn active_language_code() -> Option<String> {
     active_keyboard_language().map(|language| language.to_uppercase())
 }
 
-/// Like [`enabled_keyboard_languages`], but guaranteed to run the Carbon
-/// input-source *enumeration* on the main dispatch queue. `TISCreateInputSourceList`
-/// calls `dispatch_assert_queue(dispatch_get_main_queue())` and aborts the
-/// process on any other queue, and callers such as `transcribe` run on a
-/// `spawn_blocking` worker — so hop onto the real main queue via libdispatch and
-/// block for the result. Safe from any non-main thread: the main run loop
-/// services the main queue, so this cannot deadlock.
+/// Run a Carbon TIS closure on the main dispatch queue and block for its result.
+///
+/// Every Text Input Source call must run on the main queue on recent macOS.
+/// `TISCreateInputSourceList` has always asserted it, but as of macOS 26 so does
+/// `TISGetInputSourceProperty`: it validates the source ref via
+/// `isValidateInputSourceRef` → `islGetInputSourceListWithAdditions`, which calls
+/// `dispatch_assert_queue(dispatch_get_main_queue())` and aborts the process off
+/// the main queue (`EXC_BREAKPOINT`). This bites even when reading the *current*
+/// source, and it is timing-dependent: the assert only fires while the input-source
+/// list cache is cold (e.g. just after login), so an off-main read can appear safe
+/// for a whole session and then crash on the next boot.
+///
+/// Callers such as `transcribe` (a `spawn_blocking` worker) and the overlay-show
+/// path run off the main thread, so hop onto the real main queue via libdispatch
+/// and block for the result. Safe from any non-main thread: the main run loop
+/// services the main queue, so this cannot deadlock. When already on the main
+/// thread (e.g. the headless CLI path, or a nested TIS call), run inline —
+/// dispatching and blocking there would deadlock with no run loop draining it.
 #[cfg(target_os = "macos")]
-pub fn enabled_keyboard_languages_on_main() -> Vec<String> {
+fn run_on_main<T, F>(work: F) -> T
+where
+    T: Default + Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
     extern "C" {
         fn pthread_main_np() -> std::os::raw::c_int;
     }
 
-    // Already on the main thread (e.g. the headless CLI transcribe path): the
-    // enumeration is safe to run directly, and dispatching to the main queue
-    // while blocking here would deadlock when no run loop is draining it.
     if unsafe { pthread_main_np() } != 0 {
-        return enabled_keyboard_languages();
+        return work();
     }
 
     let (tx, rx) = std::sync::mpsc::channel();
     dispatch::Queue::main().exec_async(move || {
-        let _ = tx.send(enabled_keyboard_languages());
+        let _ = tx.send(work());
     });
     rx.recv().unwrap_or_default()
+}
+
+/// Like [`enabled_keyboard_languages`], but guaranteed to run the Carbon TIS
+/// access on the main dispatch queue (see [`run_on_main`]). Kept as a named entry
+/// point for the recovery path; the underlying reads now hop to main on their own.
+#[cfg(target_os = "macos")]
+pub fn enabled_keyboard_languages_on_main() -> Vec<String> {
+    run_on_main(enabled_keyboard_languages)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -165,12 +185,12 @@ pub(crate) fn primary_subtag(language: &str) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn current_keyboard_input_source() -> Option<KeyboardInputSource> {
-    macos_input_sources::current()
+    run_on_main(macos_input_sources::current)
 }
 
 #[cfg(target_os = "macos")]
 fn enabled_keyboard_input_sources() -> Vec<KeyboardInputSource> {
-    macos_input_sources::enabled()
+    run_on_main(macos_input_sources::enabled)
 }
 
 #[cfg(not(target_os = "macos"))]

@@ -72,9 +72,9 @@ thread the first time recovery ran.
 **Cause:** Carbon's input-source *enumeration* (`TISCreateInputSourceList`)
 asserts it is running on the main dispatch queue and kills the process otherwise.
 `transcribe()` runs on a `spawn_blocking` worker, so enumerating the enabled
-keyboards from there aborted. (The single *current-source* lookup used for
-routing does **not** enumerate and is safe off the main thread — that is why
-phase-1 routing never crashed.)
+keyboards from there aborted. (At the time we believed the single *current-source*
+lookup used for routing was safe off the main thread — section 13 shows that was
+wrong on macOS 26+.)
 
 - `327f57b` — first attempt, marshalling via Tauri's `run_on_main_thread`.
 - `78bc0dc` — second attempt, hopping onto the real main dispatch queue via
@@ -256,6 +256,36 @@ Recorded the fork-local setup and language-routing decisions, then arranged
 `AGENTS.md` as the single source with `CLAUDE.md` a symlink to it (matching
 upstream's AGENTS-as-base convention, but via a real symlink so both names
 resolve to one document).
+
+---
+
+## 13. The crash saga, part two — `TISGetInputSourceProperty` also needs main
+
+The section-3 fix routed the *enumeration* to the main queue but left the
+*current-source* reads running wherever they were called, on the stated
+assumption that reading a property off the current input source is safe off the
+main thread. On **macOS 26+ that assumption is false**, and it surfaced as a
+fresh-boot `EXC_BREAKPOINT` on a worker thread from the overlay-show path
+(`active_language_code`).
+
+**Cause:** `TISGetInputSourceProperty` validates the source ref via
+`isValidateInputSourceRef` → `islGetInputSourceListWithAdditions`, which calls
+`dispatch_assert_queue(main)` and aborts off the main queue — even when the
+property belongs to the *current* source, not an enumeration. It is
+**timing-dependent**: the assert only fires while the input-source list cache is
+cold (just after login), so an off-main read runs fine for a whole session and
+then crashes on the next boot. That is exactly how it presented — the crashes
+began immediately after a system restart.
+
+**Fix:** generalize the libdispatch hop into a single `run_on_main` helper
+(keeping the `pthread_main_np` guard so nested/CLI calls run inline) and route
+**every** TIS access through it — the current-source read as well as the
+enumeration. `active_language_code`, `enabled_keyboard_languages`, and the
+recovery entry point all now funnel through the main queue.
+
+**The lesson:** "reads the current source, doesn't enumerate" was not a safe
+proxy for "doesn't touch the input-source list". On modern macOS, treat *all*
+Text Input Source calls as main-queue-only.
 
 ---
 

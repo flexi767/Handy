@@ -525,9 +525,11 @@ fn show_overlay_state(app_handle: &AppHandle, state: &str) {
         }
 
         // Include the active keyboard language so the overlay can show a
-        // two-letter indicator in front of the waveform. Reading the current
-        // input source is safe on this thread (only the enabled-list
-        // enumeration requires the main dispatch queue).
+        // two-letter indicator in front of the waveform. `active_language_code`
+        // reads the input source on the main dispatch queue internally, so it is
+        // safe to call from this (possibly non-main) thread — the underlying
+        // TISGetInputSourceProperty aborts the process off the main queue on
+        // macOS 26+.
         let _ = overlay_window.emit(
             "show-overlay",
             OverlayShowEvent {
