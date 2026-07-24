@@ -90,6 +90,14 @@ fn active_keyboard_language() -> Option<String> {
     current_keyboard_input_source().and_then(|source| source.primary_language())
 }
 
+/// The active keyboard layout's language as an uppercase display code
+/// (e.g. `"EN"`, `"BG"`), or `None` when no layout maps to a language. Reads only
+/// the current input source, so it is safe off the main thread (unlike the
+/// enabled-list enumeration).
+pub fn active_language_code() -> Option<String> {
+    active_keyboard_language().map(|language| language.to_uppercase())
+}
+
 /// Like [`enabled_keyboard_languages`], but guaranteed to run the Carbon
 /// input-source *enumeration* on the main dispatch queue. `TISCreateInputSourceList`
 /// calls `dispatch_assert_queue(dispatch_get_main_queue())` and aborts the

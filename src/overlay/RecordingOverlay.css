@@ -308,6 +308,17 @@
   background: var(--s-accent);
   transition: height 80ms linear;
 }
+/* Two-letter active-keyboard-language code shown in front of the waveform. */
+.slang {
+  margin-right: 4px;
+  font-size: 10px;
+  font-weight: 650;
+  line-height: 1;
+  letter-spacing: 0.04em;
+  color: var(--s-muted);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
 .sx {
   width: 22px;
   height: 22px;

@@ -1,6 +1,7 @@
 use crate::input;
 use crate::settings;
 use crate::settings::{OverlayPosition, OverlayStyle};
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize};
@@ -458,6 +459,14 @@ pub fn create_recording_overlay(app_handle: &AppHandle) {
     }
 }
 
+/// Payload for the `show-overlay` event. `language` is the active keyboard
+/// layout's uppercase code (e.g. `"BG"`), or `None` when unavailable.
+#[derive(Clone, Serialize)]
+struct OverlayShowEvent {
+    state: String,
+    language: Option<String>,
+}
+
 fn show_overlay_state(app_handle: &AppHandle, state: &str) {
     // Whether the overlay shows at all is governed by overlay_style; position
     // only chooses Top vs Bottom placement.
@@ -515,7 +524,17 @@ fn show_overlay_state(app_handle: &AppHandle, state: &str) {
             log::error!("Failed to re-assert recording overlay position: {error}");
         }
 
-        let _ = overlay_window.emit("show-overlay", state);
+        // Include the active keyboard language so the overlay can show a
+        // two-letter indicator in front of the waveform. Reading the current
+        // input source is safe on this thread (only the enabled-list
+        // enumeration requires the main dispatch queue).
+        let _ = overlay_window.emit(
+            "show-overlay",
+            OverlayShowEvent {
+                state: state.to_string(),
+                language: crate::keyboard_language::active_language_code(),
+            },
+        );
         log::debug!(
             "overlay '{}': set_size={:?} pos_calc={:?} set_pos={:?} show={:?}",
             state,

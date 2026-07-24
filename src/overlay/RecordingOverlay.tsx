@@ -22,6 +22,8 @@ const RecordingOverlay: React.FC = () => {
   const { t } = useTranslation();
   const [isVisible, setIsVisible] = useState(false);
   const [state, setState] = useState<OverlayState>("recording");
+  // Active keyboard language (two-letter code) shown in front of the waveform.
+  const [language, setLanguage] = useState<string | null>(null);
   const [levels, setLevels] = useState<number[]>(Array(WAVE_BARS).fill(0));
   const [streamText, setStreamText] = useState<StreamTextEvent>({
     committed: "",
@@ -64,7 +66,16 @@ const RecordingOverlay: React.FC = () => {
         } catch {
           // Keep the previous/default placement if settings can't be read.
         }
-        const overlayState = event.payload as OverlayState;
+        // Payload is `{ state, language }`; tolerate an older bare-string
+        // payload during a hot reload.
+        const payload = event.payload as
+          | { state: OverlayState; language: string | null }
+          | OverlayState;
+        const overlayState =
+          typeof payload === "string" ? payload : payload.state;
+        if (typeof payload !== "string") {
+          setLanguage(payload.language);
+        }
         setState(overlayState);
         if (overlayState === "recording" || overlayState === "streaming") {
           setStreamText({ committed: "", tentative: "" });
@@ -152,6 +163,7 @@ const RecordingOverlay: React.FC = () => {
   // ---- Shared building blocks (one visual language for every overlay form) ----
   const waveform = (
     <div className="swave">
+      {language && <span className="slang">{language}</span>}
       {levels.map((v, i) => (
         <i
           key={i}

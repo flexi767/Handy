@@ -243,20 +243,20 @@ or the build script instead.
 
 These live in `~/Library/Application Support/com.pais.handy/settings_store.json`
 (under a top-level `"settings"` key), **not** in the repo. The app caches them in
-memory, so edit the file *and restart the app* — otherwise the change is ignored
+memory, so edit the file _and restart the app_ — otherwise the change is ignored
 or overwritten on the next save.
 
-| setting | value | why |
-| --- | --- | --- |
-| `selected_model` | `handy-computer/whisper-large-v3-turbo-gguf/whisper-large-v3-turbo-Q8_0.gguf` | Whisper handles Bulgarian far better than parakeet/nemotron, which skew toward English and major languages |
-| `selected_language` | `follow_keyboard` | transcribe whichever installed keyboard language is being spoken |
-| `extra_recording_buffer_ms` | `100` | keeps the mic open briefly after key release so trailing words survive |
+| setting                     | value                                                                         | why                                                                                                        |
+| --------------------------- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `selected_model`            | `handy-computer/whisper-large-v3-turbo-gguf/whisper-large-v3-turbo-Q8_0.gguf` | Whisper handles Bulgarian far better than parakeet/nemotron, which skew toward English and major languages |
+| `selected_language`         | `follow_keyboard`                                                             | transcribe whichever installed keyboard language is being spoken                                           |
+| `extra_recording_buffer_ms` | `100`                                                                         | keeps the mic open briefly after key release so trailing words survive                                     |
 
 Model IDs are `<hf-repo>/<filename>`. Models are discovered from the Hugging Face
 cache (`~/.cache/huggingface/hub/models--<org>--<repo>/`), which needs the full
 layout: `blobs/<sha256>`, `snapshots/<commit>/<file>` symlinked to the blob, and
 `refs/main` containing the commit. `is_downloaded` is a check for that exact
-file, so a model only counts as present if the *default quant* is the one on disk.
+file, so a model only counts as present if the _default quant_ is the one on disk.
 
 Settings backups from past changes: `settings_store.json.bak-*`.
 
@@ -266,7 +266,7 @@ Verified against the code (`audio_toolkit/vad/`), frames are 30 ms:
 
 - `VAD_THRESHOLD` 0.3 (permissive; Silero's usual default is 0.5)
 - `VAD_ONSET_FRAMES` 2 → only 60 ms of speech needed to trigger
-- `VAD_PREFILL_FRAMES` 15 → 450 ms *before* the trigger is retained, so the
+- `VAD_PREFILL_FRAMES` 15 → 450 ms _before_ the trigger is retained, so the
   leading edge is already protected
 - `VAD_OFFLINE_HANGOVER_FRAMES` 15 → 450 ms kept after speech ends
 
@@ -281,7 +281,7 @@ window is the ~57 ms between keypress and the mic stream opening.
 Design decisions worth not re-litigating:
 
 - A detection-capable model is left on **auto**, not forced to the active layout.
-  Forcing a language the speech is not in makes Whisper *translate* into it (the
+  Forcing a language the speech is not in makes Whisper _translate_ into it (the
   `language` token tells the decoder what to emit — the `translate` task is not
   involved and turning it off does not help).
 - Wrong-language recovery constrains the result to the enabled keyboard languages
