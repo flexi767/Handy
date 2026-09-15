@@ -348,6 +348,7 @@
         "options": {
           "never": "Asla",
           "immediately": "Hemen",
+          "min1": "1 dakika sonra",
           "min2": "2 dakika sonra",
           "min5": "5 dakika sonra",
           "min10": "10 dakika sonra",

@@ -348,6 +348,7 @@
         "options": {
           "never": "Nigdy",
           "immediately": "Natychmiast",
+          "min1": "Po 1 minucie",
           "min2": "Po 2 minutach",
           "min5": "Po 5 minutach",
           "min10": "Po 10 minutach",

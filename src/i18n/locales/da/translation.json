@@ -348,6 +348,7 @@
         "options": {
           "never": "Aldrig",
           "immediately": "Med det samme",
+          "min1": "Efter 1 minut",
           "min2": "Efter 2 minutter",
           "min5": "Efter 5 minutter",
           "min10": "Efter 10 minutter",

@@ -348,6 +348,7 @@
         "options": {
           "never": "안 함",
           "immediately": "즉시",
+          "min1": "1분 후",
           "min2": "2분 후",
           "min5": "5분 후",
           "min10": "10분 후",

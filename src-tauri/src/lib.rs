@@ -592,16 +592,11 @@ fn run_headless_transcription(app: &AppHandle, args: &CliArgs) -> i32 {
     0
 }
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run(cli_args: CliArgs) {
-    // Detect portable mode before anything else
-    portable::init();
-
-    // Parse console logging directives from RUST_LOG, falling back to info-level logging
-    // when the variable is unset
-    let console_filter = build_console_filter();
-
-    let specta_builder = Builder::<tauri::Wry>::new()
+/// Every command and event exposed to the frontend. Shared by `run()` and the
+/// bindings export test, so `src/bindings.ts` can be regenerated without
+/// launching the app.
+fn specta_builder() -> Builder<tauri::Wry> {
+    Builder::<tauri::Wry>::new()
         .commands(collect_commands![
             shortcut::change_binding,
             shortcut::reset_binding,
@@ -715,15 +710,51 @@ pub fn run(cli_args: CliArgs) {
             managers::history::HistoryUpdatePayload,
             managers::transcription::StreamTextEvent,
             managers::transcription::StreamPhaseEvent,
-        ]);
+        ])
+}
 
-    #[cfg(debug_assertions)] // <- Only export on non-release builds
-    specta_builder
+/// Writes `src/bindings.ts`. The path is relative to `src-tauri`, which is the
+/// working directory for both `tauri dev` and `cargo test`.
+#[cfg(any(debug_assertions, test))]
+fn export_typescript_bindings(builder: &Builder<tauri::Wry>) {
+    builder
         .export(
             Typescript::default().bigint(BigIntExportBehavior::Number),
             "../src/bindings.ts",
         )
         .expect("Failed to export typescript bindings");
+}
+
+#[cfg(test)]
+mod bindings_tests {
+    /// Regenerates `src/bindings.ts` from the same builder `run()` uses, without
+    /// starting the app — which would load the settings store and, if Handy is
+    /// already running, forward to it. Ignored by default because it writes into
+    /// the source tree. Run it after changing a command or a `specta::Type`:
+    ///
+    /// ```text
+    /// cargo test --lib bindings_tests -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "writes src/bindings.ts; run explicitly to regenerate"]
+    fn export_typescript_bindings() {
+        super::export_typescript_bindings(&super::specta_builder());
+    }
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run(cli_args: CliArgs) {
+    // Detect portable mode before anything else
+    portable::init();
+
+    // Parse console logging directives from RUST_LOG, falling back to info-level logging
+    // when the variable is unset
+    let console_filter = build_console_filter();
+
+    let specta_builder = specta_builder();
+
+    #[cfg(debug_assertions)] // <- Only export on non-release builds
+    export_typescript_bindings(&specta_builder);
 
     let invoke_handler = specta_builder.invoke_handler();
 

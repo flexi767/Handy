@@ -965,7 +965,17 @@ sha256: string | null } } |
  * in a shared cache. Nothing to download.
  */
 "Local"
-export type ModelUnloadTimeout = "never" | "immediately" | "min_2" | "min_5" | "min_10" | "min_15" | "hour_1" | "sec_15"
+/**
+ * How long an idle model stays loaded before it is unloaded.
+ * 
+ * These strings are persisted in users' settings stores, so they are a
+ * compatibility contract. The numbered variants carry an explicit `rename`
+ * because serde and specta disagree about digit boundaries under
+ * `snake_case`: serde has always written `min5`, while specta would generate
+ * `min_5` into `bindings.ts`. Pinning the spelling keeps both on the value
+ * that is actually on disk.
+ */
+export type ModelUnloadTimeout = "never" | "immediately" | "min1" | "min2" | "min5" | "min10" | "min15" | "hour1" | "sec15"
 export type OrtAcceleratorSetting = "auto" | "cpu" | "cuda" | "directml" | "rocm"
 export type OverlayPosition = "top" | "bottom"
 /**

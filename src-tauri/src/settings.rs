@@ -130,17 +130,33 @@ pub enum OverlayStyle {
     Live,
 }
 
+/// How long an idle model stays loaded before it is unloaded.
+///
+/// These strings are persisted in users' settings stores, so they are a
+/// compatibility contract. The numbered variants carry an explicit `rename`
+/// because serde and specta disagree about digit boundaries under
+/// `snake_case`: serde has always written `min5`, while specta would generate
+/// `min_5` into `bindings.ts`. Pinning the spelling keeps both on the value
+/// that is actually on disk.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Type, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelUnloadTimeout {
     Never,
     Immediately,
+    #[serde(rename = "min1")]
+    Min1,
+    #[serde(rename = "min2")]
     Min2,
     #[default]
+    #[serde(rename = "min5")]
     Min5,
+    #[serde(rename = "min10")]
     Min10,
+    #[serde(rename = "min15")]
     Min15,
+    #[serde(rename = "hour1")]
     Hour1,
+    #[serde(rename = "sec15")]
     Sec15, // Debug mode only
 }
 
@@ -213,6 +229,7 @@ impl ModelUnloadTimeout {
         match self {
             ModelUnloadTimeout::Never => None,
             ModelUnloadTimeout::Immediately => Some(0), // Special case for immediate unloading
+            ModelUnloadTimeout::Min1 => Some(1),
             ModelUnloadTimeout::Min2 => Some(2),
             ModelUnloadTimeout::Min5 => Some(5),
             ModelUnloadTimeout::Min10 => Some(10),
@@ -1356,6 +1373,70 @@ mod tests {
         assert_eq!(
             settings.settings_schema_version,
             CURRENT_SETTINGS_SCHEMA_VERSION
+        );
+    }
+
+    /// Pins the persisted spellings. Stores already on users' disks hold these
+    /// exact strings, and `bindings.ts` is generated from the same attributes,
+    /// so changing one breaks both old settings and the settings UI.
+    #[test]
+    fn model_unload_timeout_wire_spellings_are_stable() {
+        let cases = [
+            (ModelUnloadTimeout::Never, "never"),
+            (ModelUnloadTimeout::Immediately, "immediately"),
+            (ModelUnloadTimeout::Min1, "min1"),
+            (ModelUnloadTimeout::Min2, "min2"),
+            (ModelUnloadTimeout::Min5, "min5"),
+            (ModelUnloadTimeout::Min10, "min10"),
+            (ModelUnloadTimeout::Min15, "min15"),
+            (ModelUnloadTimeout::Hour1, "hour1"),
+            (ModelUnloadTimeout::Sec15, "sec15"),
+        ];
+        for (timeout, wire) in cases {
+            assert_eq!(
+                serde_json::to_value(timeout).unwrap(),
+                serde_json::json!(wire)
+            );
+            assert_eq!(
+                serde_json::from_value::<ModelUnloadTimeout>(serde_json::json!(wire)).unwrap(),
+                timeout
+            );
+        }
+    }
+
+    #[test]
+    fn one_minute_unload_timeout_round_trips_through_the_settings_store() {
+        let mut stored = default_settings_json();
+        stored["model_unload_timeout"] = serde_json::json!("min1");
+
+        let settings: AppSettings =
+            serde_json::from_value(stored).expect("min1 must parse without salvage");
+        assert_eq!(settings.model_unload_timeout, ModelUnloadTimeout::Min1);
+
+        let written = serde_json::to_value(&settings).unwrap();
+        assert_eq!(written["model_unload_timeout"], serde_json::json!("min1"));
+    }
+
+    #[test]
+    fn unload_timeouts_convert_to_seconds() {
+        assert_eq!(ModelUnloadTimeout::Min1.to_seconds(), Some(60));
+        assert_eq!(ModelUnloadTimeout::Min2.to_seconds(), Some(120));
+        assert_eq!(ModelUnloadTimeout::Min5.to_seconds(), Some(300));
+        assert_eq!(ModelUnloadTimeout::Min10.to_seconds(), Some(600));
+        assert_eq!(ModelUnloadTimeout::Min15.to_seconds(), Some(900));
+        assert_eq!(ModelUnloadTimeout::Hour1.to_seconds(), Some(3600));
+        assert_eq!(ModelUnloadTimeout::Sec15.to_seconds(), Some(15));
+        assert_eq!(ModelUnloadTimeout::Immediately.to_seconds(), Some(0));
+        assert_eq!(ModelUnloadTimeout::Never.to_seconds(), None);
+    }
+
+    /// A new, shorter option must not change what existing installs get.
+    #[test]
+    fn adding_a_shorter_unload_timeout_keeps_the_existing_default() {
+        assert_eq!(ModelUnloadTimeout::default(), ModelUnloadTimeout::Min5);
+        assert_eq!(
+            get_default_settings().model_unload_timeout,
+            ModelUnloadTimeout::Min5
         );
     }
 

@@ -348,6 +348,7 @@
         "options": {
           "never": "Nunca",
           "immediately": "Inmediatamente",
+          "min1": "Después de 1 minuto",
           "min2": "Después de 2 minutos",
           "min5": "Después de 5 minutos",
           "min10": "Después de 10 minutos",

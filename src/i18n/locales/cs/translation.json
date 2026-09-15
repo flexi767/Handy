@@ -348,6 +348,7 @@
         "options": {
           "never": "Nikdy",
           "immediately": "Okamžitě",
+          "min1": "Po 1 minutě",
           "min2": "Po 2 minutách",
           "min5": "Po 5 minutách",
           "min10": "Po 10 minutách",

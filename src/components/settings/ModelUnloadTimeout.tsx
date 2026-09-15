@@ -10,6 +10,11 @@ interface ModelUnloadTimeoutProps {
   grouped?: boolean;
 }
 
+interface TimeoutOption {
+  value: ModelUnloadTimeout;
+  label: string;
+}
+
 export const ModelUnloadTimeoutSetting: React.FC<ModelUnloadTimeoutProps> = ({
   descriptionMode = "inline",
   grouped = false,
@@ -17,48 +22,50 @@ export const ModelUnloadTimeoutSetting: React.FC<ModelUnloadTimeoutProps> = ({
   const { t } = useTranslation();
   const { settings, getSetting, updateSetting } = useSettings();
 
-  const timeoutOptions = [
+  const timeoutOptions: TimeoutOption[] = [
     {
-      value: "never" as ModelUnloadTimeout,
+      value: "never",
       label: t("settings.advanced.modelUnload.options.never"),
     },
     {
-      value: "immediately" as ModelUnloadTimeout,
+      value: "immediately",
       label: t("settings.advanced.modelUnload.options.immediately"),
     },
     {
-      value: "min2" as ModelUnloadTimeout,
+      value: "min1",
+      label: t("settings.advanced.modelUnload.options.min1"),
+    },
+    {
+      value: "min2",
       label: t("settings.advanced.modelUnload.options.min2"),
     },
     {
-      value: "min5" as ModelUnloadTimeout,
+      value: "min5",
       label: t("settings.advanced.modelUnload.options.min5"),
     },
     {
-      value: "min10" as ModelUnloadTimeout,
+      value: "min10",
       label: t("settings.advanced.modelUnload.options.min10"),
     },
     {
-      value: "min15" as ModelUnloadTimeout,
+      value: "min15",
       label: t("settings.advanced.modelUnload.options.min15"),
     },
     {
-      value: "hour1" as ModelUnloadTimeout,
+      value: "hour1",
       label: t("settings.advanced.modelUnload.options.hour1"),
     },
   ];
 
-  const debugTimeoutOptions = [
+  const debugTimeoutOptions: TimeoutOption[] = [
     ...timeoutOptions,
     {
-      value: "sec15" as ModelUnloadTimeout,
+      value: "sec15",
       label: t("settings.advanced.modelUnload.options.sec15"),
     },
   ];
 
-  const handleChange = async (event: React.ChangeEvent<HTMLSelectElement>) => {
-    const newTimeout = event.target.value as ModelUnloadTimeout;
-
+  const handleChange = async (newTimeout: ModelUnloadTimeout) => {
     try {
       await commands.setModelUnloadTimeout(newTimeout);
       updateSetting("model_unload_timeout", newTimeout);
@@ -83,11 +90,16 @@ export const ModelUnloadTimeoutSetting: React.FC<ModelUnloadTimeoutProps> = ({
       <Dropdown
         options={options}
         selectedValue={currentValue}
-        onSelect={(value) =>
-          handleChange({
-            target: { value },
-          } as React.ChangeEvent<HTMLSelectElement>)
-        }
+        onSelect={(value) => {
+          // Dropdown reports a plain string; map it back to the typed option
+          // rather than casting, so an unknown value never reaches the backend.
+          const selected = options.find(
+            (candidate) => candidate.value === value,
+          );
+          if (selected) {
+            handleChange(selected.value);
+          }
+        }}
         disabled={false}
       />
     </SettingContainer>

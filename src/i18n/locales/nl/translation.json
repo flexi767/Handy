@@ -348,6 +348,7 @@
         "options": {
           "never": "Nooit",
           "immediately": "Direct",
+          "min1": "Na 1 minuut",
           "min2": "Na 2 minuten",
           "min5": "Na 5 minuten",
           "min10": "Na 10 minuten",
