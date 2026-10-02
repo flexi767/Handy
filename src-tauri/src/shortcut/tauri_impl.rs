@@ -3,7 +3,7 @@
 //! This module provides shortcut functionality using Tauri's built-in
 //! global-shortcut plugin.
 
-use log::{error, warn};
+use log::{debug, error, warn};
 use tauri::AppHandle;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
@@ -62,11 +62,17 @@ pub fn validate_shortcut(raw: &str) -> Result<(), String> {
     // Check for at least one non-modifier key
     let has_non_modifier = parts.iter().any(|part| !modifiers.contains(&part.as_str()));
 
-    if has_non_modifier {
-        Ok(())
-    } else {
-        Err("Tauri shortcuts must include a main key (letter, number, F-key, etc.) in addition to modifiers".into())
+    if !has_non_modifier {
+        return Err("Tauri shortcuts must include a main key (letter, number, F-key, etc.) in addition to modifiers".into());
     }
+
+    // The name check above passes side-specific modifiers such as
+    // `option_left`, which the handy-keys recorder saves but the accelerator
+    // parser rejects. Parse here so a binding carried over from handy-keys is
+    // reset to the default instead of failing to register.
+    raw.parse::<Shortcut>()
+        .map(|_| ())
+        .map_err(|e| format!("Failed to parse shortcut '{}': {}", raw, e))
 }
 
 /// Register a shortcut using Tauri's global-shortcut plugin
@@ -108,6 +114,13 @@ pub fn register_shortcut(app: &AppHandle, binding: ShortcutBinding) -> Result<()
             if scut == &shortcut {
                 let shortcut_string = scut.into_string();
                 let is_pressed = event.state == ShortcutState::Pressed;
+                // Mirrors the handy-keys event log line; the distinct prefix
+                // makes it possible to tell which backend fired a shortcut
+                // (e.g. when diagnosing the Secure Input fallback)
+                debug!(
+                    "tauri global-shortcut event: binding={}, shortcut={}, state={:?}",
+                    binding_id_for_closure, shortcut_string, event.state
+                );
                 handle_shortcut_event(
                     app_handle,
                     &binding_id_for_closure,
@@ -194,5 +207,31 @@ pub fn unregister_cancel_shortcut(app: &AppHandle) {
                 let _ = unregister_shortcut(&app_clone, cancel_binding);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_shortcut;
+
+    #[test]
+    fn rejects_side_specific_modifiers_the_parser_cannot_register() {
+        for raw in ["option_left+space", "ctrl_right+space"] {
+            assert!(validate_shortcut(raw).is_err(), "{raw} should be rejected");
+        }
+    }
+
+    #[test]
+    fn accepts_the_default_shortcuts() {
+        for raw in [
+            "option+space",
+            "option+shift+space",
+            "ctrl+space",
+            "ctrl+shift+space",
+            "alt+space",
+            "escape",
+        ] {
+            assert_eq!(validate_shortcut(raw), Ok(()), "{raw} should be accepted");
+        }
     }
 }

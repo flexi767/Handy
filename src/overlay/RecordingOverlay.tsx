@@ -24,6 +24,10 @@ const RecordingOverlay: React.FC = () => {
   const [state, setState] = useState<OverlayState>("recording");
   // Active keyboard language (two-letter code) shown in front of the waveform.
   const [language, setLanguage] = useState<string | null>(null);
+  // `Stream::play()` returning does not mean hardware callbacks are flowing.
+  // Stay visually in an arming state until the backend processes the first
+  // actual microphone sample chunk.
+  const [captureReady, setCaptureReady] = useState(false);
   const [levels, setLevels] = useState<number[]>(Array(WAVE_BARS).fill(0));
   const [streamText, setStreamText] = useState<StreamTextEvent>({
     committed: "",
@@ -53,6 +57,26 @@ const RecordingOverlay: React.FC = () => {
   useEffect(() => {
     const setupEventListeners = async () => {
       const unlistenShow = await listen("show-overlay", async (event) => {
+        // Payload is `{ state, language }`; tolerate an older bare-string
+        // payload during a hot reload.
+        const payload = event.payload as
+          | { state: OverlayState; language: string | null }
+          | OverlayState;
+        const overlayState =
+          typeof payload === "string" ? payload : payload.state;
+        if (typeof payload !== "string") {
+          setLanguage(payload.language);
+        }
+        // Reset synchronously before settings I/O. A fast microphone can emit
+        // recording-ready while the awaits below are in flight; resetting after
+        // them would overwrite that event and leave the overlay stuck arming.
+        if (overlayState === "recording" || overlayState === "streaming") {
+          setCaptureReady(false);
+          smoothedLevelsRef.current = Array(16).fill(0);
+          setLevels(Array(WAVE_BARS).fill(0));
+          setStreamText({ committed: "", tentative: "" });
+        }
+
         await syncLanguageFromSettings();
         // The Live panel flows downward from a top overlay and upward from a
         // bottom one; read the placement so the layout can flip to match.
@@ -66,20 +90,7 @@ const RecordingOverlay: React.FC = () => {
         } catch {
           // Keep the previous/default placement if settings can't be read.
         }
-        // Payload is `{ state, language }`; tolerate an older bare-string
-        // payload during a hot reload.
-        const payload = event.payload as
-          | { state: OverlayState; language: string | null }
-          | OverlayState;
-        const overlayState =
-          typeof payload === "string" ? payload : payload.state;
-        if (typeof payload !== "string") {
-          setLanguage(payload.language);
-        }
         setState(overlayState);
-        if (overlayState === "recording" || overlayState === "streaming") {
-          setStreamText({ committed: "", tentative: "" });
-        }
         if (overlayState === "streaming") {
           setPhase("listening");
           setWorkKind("transcribing");
@@ -91,6 +102,12 @@ const RecordingOverlay: React.FC = () => {
 
       const unlistenHide = await listen("hide-overlay", () => {
         setIsVisible(false);
+        setCaptureReady(false);
+      });
+
+      const unlistenReady = await listen("recording-ready", () => {
+        setElapsed(0);
+        setCaptureReady(true);
       });
 
       const unlistenLevel = await listen<number[]>("mic-level", (event) => {
@@ -118,6 +135,7 @@ const RecordingOverlay: React.FC = () => {
       return () => {
         unlistenShow();
         unlistenHide();
+        unlistenReady();
         unlistenLevel();
         unlistenStream();
         unlistenPhase();
@@ -127,12 +145,12 @@ const RecordingOverlay: React.FC = () => {
     setupEventListeners();
   }, []);
 
-  // Elapsed timer while the Live overlay is visible.
+  // Elapsed capture timer starts only once microphone samples are flowing.
   useEffect(() => {
-    if (state !== "streaming" || !isVisible) return;
+    if (state !== "streaming" || !isVisible || !captureReady) return;
     const id = setInterval(() => setElapsed((e) => e + 1), 1000);
     return () => clearInterval(id);
-  }, [state, isVisible]);
+  }, [state, isVisible, captureReady]);
 
   // Stick to the bottom as text streams in — but only while pinned, so a user who
   // has scrolled up to read history isn't yanked back down by the next chunk.
@@ -150,6 +168,8 @@ const RecordingOverlay: React.FC = () => {
     setOverflowing(false);
   }, [session]);
 
+  if (!isVisible) return null;
+
   // Re-pin when the user is within ~a line of the bottom; unpin otherwise.
   const handleStreamScroll = () => {
     const el = capRef.current;
@@ -162,7 +182,7 @@ const RecordingOverlay: React.FC = () => {
 
   // ---- Shared building blocks (one visual language for every overlay form) ----
   const waveform = (
-    <div className="swave">
+    <div className={`swave ${captureReady ? "ready" : "arming"}`}>
       {levels.map((v, i) => (
         <i
           key={i}
@@ -196,7 +216,7 @@ const RecordingOverlay: React.FC = () => {
   const listeningRow = (showTimer: boolean, showCancel: boolean) => (
     <div className="sbase">
       <div className="sbase-l">
-        <span className="sdot" />
+        <span className={`sdot ${captureReady ? "ready" : "arming"}`} />
       </div>
       {/* Anchored beside the dot and taken out of the grid flow so it never
           shrinks the centered waveform column. */}
