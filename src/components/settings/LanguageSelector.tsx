@@ -6,10 +6,10 @@ import { useSettings } from "../../hooks/useSettings";
 import { useOsType } from "../../hooks/useOsType";
 import {
   getLanguageLabel,
+  LANGUAGES,
   recognitionLanguage,
   FOLLOW_KEYBOARD_LANGUAGE,
   FOLLOW_KEYBOARD_LANGUAGE_OPTION,
-  SELECTABLE_LANGUAGES,
   supportsLanguageCode,
 } from "../../lib/constants/languages";
 
@@ -22,18 +22,11 @@ interface LanguageSelectorProps {
   supportsLanguageDetection?: boolean;
 }
 
-// Convert a concrete or aliased code to the picker entry that represents it.
-// Chinese script intents are already selectable and must remain intact; model
-// codes such as `en-US` and `nb` resolve to their canonical `en` / `no` entry.
-const pickerLanguage = (languageCode: string): string =>
-  SELECTABLE_LANGUAGES.some((language) => language.value === languageCode)
-    ? languageCode
-    : recognitionLanguage(languageCode);
-
 // Mirrors the matching logic of `effective_language` in
 // src-tauri/src/managers/model.rs. The Rust function is authoritative for the
 // *concrete* code the engine receives (e.g. `nb`); this resolves the canonical
 // picker intent (e.g. `no`) so model switches preserve the user's language.
+// Model codes such as `en-US` and `nb` resolve to their `en` / `no` entry.
 const effectiveLanguage = (
   intent: string,
   supported: string[],
@@ -42,12 +35,12 @@ const effectiveLanguage = (
   // Keyboard-following resolves to a concrete locale only at recording time, so
   // it always displays as itself.
   if (intent === FOLLOW_KEYBOARD_LANGUAGE) return intent;
-  if (supported.length === 0) return pickerLanguage(intent);
+  if (supported.length === 0) return recognitionLanguage(intent);
   if (intent !== "auto" && supportsLanguageCode(supported, intent))
-    return pickerLanguage(intent);
+    return recognitionLanguage(intent);
   if (supportsDetection) return "auto";
   if (supportsLanguageCode(supported, "en")) return "en";
-  return pickerLanguage(supported[0]);
+  return recognitionLanguage(supported[0]);
 };
 
 export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
@@ -99,8 +92,8 @@ export const LanguageSelector: React.FC<LanguageSelectorProps> = ({
   const availableLanguages = useMemo(() => {
     const selectable =
       !supportedLanguages || supportedLanguages.length === 0
-        ? SELECTABLE_LANGUAGES
-        : SELECTABLE_LANGUAGES.filter((lang) =>
+        ? LANGUAGES
+        : LANGUAGES.filter((lang) =>
             lang.value === "auto"
               ? supportsLanguageDetection
               : supportsLanguageCode(supportedLanguages, lang.value),
