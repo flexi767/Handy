@@ -1450,7 +1450,7 @@ impl TranscriptionManager {
 
         // Retry order matters: English must come last so a forced-English pass
         // cannot translate over a correct result from another candidate.
-        let ordered = order_recovery_candidates(&candidates);
+        let ordered = order_recovery_candidates(&candidates, &primary_text);
         warn!(
             "Follow-keyboard: primary transcript conflicts with enabled keyboards {:?}; attempting recovery in order {:?}",
             candidates, ordered
@@ -1994,25 +1994,103 @@ fn effective_language_for_model(
     }
 }
 
-/// Order recovery candidates so English is tried last.
+/// Writing systems that tell recovery which keyboards are plausible for a
+/// transcript. Only scripts that distinguish the languages people commonly type
+/// side by side are listed; anything else gives no evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Script {
+    Latin,
+    Cyrillic,
+    Greek,
+    Arabic,
+    Hebrew,
+    Devanagari,
+    Cjk,
+}
+
+fn script_of_char(c: char) -> Option<Script> {
+    match c {
+        'A'..='Z' | 'a'..='z' | '\u{00C0}'..='\u{024F}' | '\u{1E00}'..='\u{1EFF}' => {
+            Some(Script::Latin)
+        }
+        '\u{0400}'..='\u{052F}' => Some(Script::Cyrillic),
+        '\u{0370}'..='\u{03FF}' | '\u{1F00}'..='\u{1FFF}' => Some(Script::Greek),
+        '\u{0590}'..='\u{05FF}' => Some(Script::Hebrew),
+        '\u{0600}'..='\u{06FF}' | '\u{0750}'..='\u{077F}' => Some(Script::Arabic),
+        '\u{0900}'..='\u{097F}' => Some(Script::Devanagari),
+        '\u{3040}'..='\u{30FF}' | '\u{3400}'..='\u{9FFF}' | '\u{AC00}'..='\u{D7AF}' => {
+            Some(Script::Cjk)
+        }
+        _ => None,
+    }
+}
+
+/// The script most of the transcript's letters are written in, or `None` when
+/// there are no letters in a script we recognise.
+fn dominant_script(text: &str) -> Option<Script> {
+    let mut counts: Vec<(Script, usize)> = Vec::new();
+    for script in text.chars().filter_map(script_of_char) {
+        match counts.iter_mut().find(|(s, _)| *s == script) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((script, 1)),
+        }
+    }
+    counts
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(script, _)| script)
+}
+
+/// The script a keyboard language is normally typed in (base subtag such as
+/// `bg`). Unlisted languages are Latin, which is the right default for the
+/// languages Handy users commonly enable.
+fn script_of_language(language: &str) -> Script {
+    match crate::keyboard_language::primary_subtag(language).as_deref() {
+        Some("bg" | "ru" | "uk" | "sr" | "mk" | "be" | "kk" | "ky" | "mn" | "tg") => {
+            Script::Cyrillic
+        }
+        Some("el") => Script::Greek,
+        Some("ar" | "fa" | "ur") => Script::Arabic,
+        Some("he" | "yi") => Script::Hebrew,
+        Some("hi" | "ne" | "mr") => Script::Devanagari,
+        Some("zh" | "ja" | "ko") => Script::Cjk,
+        _ => Script::Latin,
+    }
+}
+
+/// Order recovery candidates for a transcript that conflicts with the enabled
+/// keyboards.
 ///
-/// English is Whisper's translation target: the `language` token tells the
-/// decoder which language to emit, so forcing `en` on non-English audio yields
-/// fluent English rather than a transcription — and that English then passes
-/// validation, masking a correct result from another candidate. The model's own
-/// detection argues the same way: had the speech been English, auto-detect would
-/// have said so instead of picking a language the user does not type. English
-/// stays reachable as a last resort, for short or noisy clips where detection
-/// mis-fires on genuinely English speech.
-fn order_recovery_candidates(candidates: &[String]) -> Vec<String> {
+/// Keyboards that share the primary transcript's script come first. Bulgarian
+/// speech on a German keyboard is usually auto-detected as another Cyrillic
+/// language such as Russian; forcing the active German layout first makes
+/// Whisper emit German-looking text, while Bulgarian is the keyboard that fits
+/// what the model actually heard. Within each group the keyboard order is kept,
+/// so with no script evidence (or no keyboard in that script) nothing moves.
+///
+/// English is always tried last. It is Whisper's translation target: the
+/// `language` token tells the decoder which language to emit, so forcing `en`
+/// on non-English audio yields fluent English rather than a transcription, and
+/// that English then passes validation, masking a correct result from another
+/// candidate. The model's own detection argues the same way: had the speech
+/// been English, auto-detect would have said so instead of picking a language
+/// the user does not type. English stays reachable as a last resort, for short
+/// or noisy clips where detection mis-fires on genuinely English speech.
+fn order_recovery_candidates(candidates: &[String], primary_text: &str) -> Vec<String> {
     let is_english = |language: &String| {
         crate::keyboard_language::primary_subtag(language).as_deref() == Some("en")
     };
-    let mut ordered: Vec<String> = candidates
-        .iter()
-        .filter(|c| !is_english(c))
+    let transcript_script = dominant_script(primary_text);
+    let shares_script = |language: &String| {
+        transcript_script.is_some_and(|script| script_of_language(language) == script)
+    };
+
+    let non_english = || candidates.iter().filter(|c| !is_english(c));
+    let mut ordered: Vec<String> = non_english()
+        .filter(|c| shares_script(c))
         .cloned()
         .collect();
+    ordered.extend(non_english().filter(|c| !shares_script(c)).cloned());
     ordered.extend(candidates.iter().filter(|c| is_english(c)).cloned());
     ordered
 }
@@ -2654,11 +2732,11 @@ mod tests {
         // validates, so it must never pre-empt another candidate — while still
         // remaining available as a last resort.
         assert_eq!(
-            order_recovery_candidates(&languages(&["en", "de", "bg"])),
+            order_recovery_candidates(&languages(&["en", "de", "bg"]), ""),
             languages(&["de", "bg", "en"])
         );
         assert_eq!(
-            order_recovery_candidates(&languages(&["bg", "en"])),
+            order_recovery_candidates(&languages(&["bg", "en"]), ""),
             languages(&["bg", "en"])
         );
     }
@@ -2668,14 +2746,68 @@ mod tests {
         // Non-English candidates keep their existing (active-keyboard-first)
         // order, and no candidate is ever dropped.
         assert_eq!(
-            order_recovery_candidates(&languages(&["de", "bg", "fr"])),
+            order_recovery_candidates(&languages(&["de", "bg", "fr"]), ""),
             languages(&["de", "bg", "fr"])
         );
         assert_eq!(
-            order_recovery_candidates(&languages(&["en"])),
+            order_recovery_candidates(&languages(&["en"]), ""),
             languages(&["en"])
         );
-        assert!(order_recovery_candidates(&[]).is_empty());
+        assert!(order_recovery_candidates(&[], "").is_empty());
+    }
+
+    #[test]
+    fn recovery_prefers_keyboards_that_share_the_transcripts_script() {
+        // Bulgarian speech on a German keyboard is typically auto-detected as
+        // another Cyrillic language (Russian). The active keyboard (de) must not
+        // be forced first: the Cyrillic keyboard (bg) is the better candidate.
+        assert_eq!(
+            order_recovery_candidates(&languages(&["de", "bg", "en"]), "Здравейте, как сте днес"),
+            languages(&["bg", "de", "en"])
+        );
+    }
+
+    #[test]
+    fn recovery_keeps_keyboard_order_when_the_script_matches_the_active_keyboard() {
+        assert_eq!(
+            order_recovery_candidates(&languages(&["de", "bg", "en"]), "Hallo wie geht es dir"),
+            languages(&["de", "bg", "en"])
+        );
+    }
+
+    #[test]
+    fn recovery_script_preference_never_drops_or_reorders_without_a_match() {
+        // Cyrillic transcript but no Cyrillic keyboard: nothing to promote.
+        assert_eq!(
+            order_recovery_candidates(&languages(&["de", "fr"]), "Здравейте"),
+            languages(&["de", "fr"])
+        );
+        // No letters at all (digits/punctuation): no script evidence.
+        assert_eq!(
+            order_recovery_candidates(&languages(&["de", "bg"]), "123 ... 45"),
+            languages(&["de", "bg"])
+        );
+    }
+
+    #[test]
+    fn recovery_still_tries_english_last_when_scripts_match() {
+        // English shares Latin script with the transcript but must stay last so
+        // a forced-English pass cannot translate over another candidate.
+        assert_eq!(
+            order_recovery_candidates(&languages(&["en", "de", "fr"]), "Bonjour tout le monde"),
+            languages(&["de", "fr", "en"])
+        );
+    }
+
+    #[test]
+    fn dominant_script_follows_the_majority_of_letters() {
+        assert_eq!(dominant_script("Привет hello"), Some(Script::Cyrillic));
+        assert_eq!(dominant_script("Hello Привет мир"), Some(Script::Cyrillic));
+        assert_eq!(dominant_script("Hello world Привет"), Some(Script::Latin));
+        assert_eq!(dominant_script("שלום עולם"), Some(Script::Hebrew));
+        assert_eq!(dominant_script("مرحبا بالعالم"), Some(Script::Arabic));
+        assert_eq!(dominant_script("12 34 !?"), None);
+        assert_eq!(dominant_script(""), None);
     }
 
     #[test]
