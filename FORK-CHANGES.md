@@ -95,6 +95,10 @@ The final mechanism is the libdispatch hop with the main-thread guard.
 
 ## 4. Fallback selection — the `bg` vs `bg-BG` mismatch
 
+> **Superseded (section 15):** the second-model fallback this section describes was
+> removed when the engine moved into a worker process. The base-subtag matching
+> itself still applies to the retry on the loaded model.
+
 **Commit:** `75ab6ee` `fix: match fallback language on base subtag, not exact locale`
 
 Recovery selected the Nemotron fallback correctly but never ran it. The retry
@@ -147,6 +151,9 @@ keyboard languages I am speaking", not "assume I am speaking the active layout".
 ---
 
 ## 7. Recovery retries on the loaded primary first
+
+> **Update (section 15):** the retry on the loaded model is now the *only* recovery
+> path; there is no longer a different model to fall back to.
 
 **Commit:** `58650eb` `fix: retry on the loaded primary before falling back to another model`
 
@@ -289,15 +296,88 @@ Text Input Source calls as main-queue-only.
 
 ---
 
+## 14. Recovery orders candidates by the transcript's script
+
+**Commit:** `6207802` `fix: try keyboards in the transcript's script first when recovering the language`
+
+Bulgarian speech on a German keyboard is auto-detected as another Cyrillic
+language (usually Russian), which is outside the enabled keyboards, so recovery
+fires. It then tried the keyboards in order, **active one first**, so German was
+forced onto Bulgarian audio and Whisper produced German-looking text.
+
+`order_recovery_candidates(candidates, primary_text)` now looks at the dominant
+script of the transcript the model actually produced (`dominant_script`, a plain
+Unicode-range count, no dependency) and puts the keyboards that share it first:
+
+| Transcript | Keyboards | Order tried |
+|---|---|---|
+| Cyrillic (Russian guess) | de, bg, en | **bg**, de, en |
+| Latin | de, bg, en | de, bg, en |
+| Cyrillic, no Cyrillic keyboard | de, fr | de, fr |
+
+Within each group the keyboard order is kept, English is still always last
+(section 8), and with no letters or no matching keyboard nothing moves. It is a
+heuristic on script, not on language: Bulgarian vs Russian is still decided by the
+validator, not by this ordering.
+
+---
+
+## 15. Upstream sync (v0.9.8 and after): the engine moves into a worker process
+
+**Commits:** `911144d` (v0.9.8), `ab6db58` (portable cache), `dec4015` (the port),
+`3145501` (ONNX removal, new recorder, transcribe-cpp 0.4.0), `6a3dab0` (build script).
+
+Upstream now runs transcribe.cpp in a **separate worker process** (the same
+executable re-launched with `--transcribe-worker`) behind `EngineSupervisor`. A GPU
+driver fault or `GGML_ASSERT` abort kills only the worker. The supervisor holds
+**exactly one model at a time**: `load()` replaces the loaded model.
+
+What that changed here:
+
+- **Recovery runs on the loaded model through `engine.transcribe`**
+  (`retry_loaded_with_forced_language`). The fork used to load a *second* model
+  (Nemotron) alongside the primary for models that cannot be forced to a
+  language. That cannot work with one model per worker, so the **second-model
+  fallback, its selection helper and its tests were removed**. A model that cannot
+  be forced keeps its original transcript. For the Whisper turbo setup this is the
+  path that mattered (section 7).
+- **Fork behaviour was re-applied inside upstream's new structure**
+  (`complete` / `decode_batch` / `run_setup`): the recovery hook runs in
+  `complete()`; the `condition_on_prev_tokens = false` guard (section 9) lives in
+  one shared `whisper_run_extension()` used by both normal runs and forced
+  retries (covered by a unit test); short-clip keyboard forcing stays in
+  `decode_batch`, and a live decode never short-clip forces.
+- **Custom words** now go to the model through transcribe-cpp's vocabulary API
+  instead of a whisper initial prompt; forced retries send the same vocabulary.
+- **Recording VAD tuning is unchanged** through upstream's recorder/VAD rewrite:
+  Silero threshold 0.3, 450 ms pre-roll, 450 ms hangover, 60 ms onset. (Upstream's
+  long-clip chunking has its own 0.5 threshold; it only decides where to split a
+  long clip for decoding.)
+- **`src/bindings.ts` is generated.** After a merge, regenerate it instead of
+  merging it by hand, with the ignored test `bindings_tests` in `src-tauri`
+  (`cargo test --lib bindings_tests -- --ignored`). A hand-merged copy had
+  `min_5`-style enum names that did not match the stored `min5`.
+- **Build script** (`scripts/build-install-macos.sh`). Upstream removed the ONNX
+  engines, so nothing links onnxruntime any more and the script no longer bundles
+  it. It still fails the build if the built app links any `/opt/homebrew` library:
+  an earlier build had bundled Homebrew's onnxruntime, which loaded protobuf and
+  abseil through `/opt/homebrew/opt/...`, and a `brew upgrade` made dyld refuse to
+  launch the app. Local builds also pass `createUpdaterArtifacts=false`, because
+  Tauri otherwise signs the updater archive with the upstream release key, which
+  this machine lacks, and the build fails after the `.app` is already bundled.
+
+---
+
 ## Current state
 
-- **Pushed to `origin/main`:** everything through `919a99e`.
-- **Committed but NOT pushed:** `485258a` and `9acd73c` (the language indicator).
-- `main` is 17 commits over `upstream/main`; `legacy/keyboard-language-v1`
-  preserves the original implementation.
-- The pre-existing test `catalog::tests::catalog_architectures_are_known_to_capability_probe`
-  fails on clean upstream too (unrelated `moss` architecture); everything else
-  passes.
+- `main` (pushed to `origin/main`) includes everything above. The Rust library
+  tests pass (307 passed, 19 ignored upstream integration tests that need real
+  models) and the frontend type check, lint and formatting are clean.
+- `legacy/keyboard-language-v1` preserves the original implementation.
+- Checked headless, not by live dictation: the worker process loads Whisper turbo
+  on Metal and transcribes Bulgarian audio, including a 67 s clip through the
+  long-form chunking path. **Not yet verified by a live dictation:** the
+  follow-keyboard recovery and the new recorder on the real microphone.
 
 ## Known limitations (not fixable by routing)
 
@@ -311,3 +391,14 @@ Text Input Source calls as main-queue-only.
   English slips through.
 - **Bulgarian vs Russian** — Apple's detector can confuse the two (both Cyrillic);
   a correct Bulgarian retry could in principle be rejected as Russian.
+- **No second-model recovery** (section 15) — if the loaded model cannot be forced to
+  a language, a wrong-language transcript is kept as is.
+- **Script, not language, orders the retries** (section 14) — the first retry is the
+  keyboard that shares the transcript's script; Bulgarian vs Russian is still left
+  to the validator.
+- **Intermittent bugs need a timestamp** — the app log rotates at 500 KB and keeps
+  one old file, which is only about three days of use. Note roughly when a
+  dictation failed so the log can still be read.
+- **Secure Event Input** — Handy logs "SecureInput held for 3s" and switches to a
+  Carbon fallback so shortcuts keep working. Most episodes name `loginwindow`
+  (screen lock or login prompts); it is not a Handy fault.
