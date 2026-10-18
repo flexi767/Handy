@@ -2169,6 +2169,21 @@ mod tests {
     }
 
     #[test]
+    fn whisper_guard_is_attached_by_arch_and_never_conditions_on_the_last_dictation() {
+        // The worker keeps its session across recordings. With conditioning on, a
+        // clip too short to constrain the decoder is completed from the previous
+        // transcript, so every whisper run (primary and forced retries) disables
+        // it. Other archs reject the whisper-kind extension, so they get none.
+        let Some(RunExtension::Whisper(options)) = whisper_run_extension("whisper") else {
+            panic!("a whisper model must get the whisper run extension");
+        };
+        assert_eq!(options.condition_on_prev_tokens, Some(false));
+        assert!(whisper_run_extension("parakeet").is_none());
+        assert!(whisper_run_extension("voxtral").is_none());
+        assert!(whisper_run_extension("").is_none());
+    }
+
+    #[test]
     fn dominant_script_follows_the_majority_of_letters() {
         assert_eq!(dominant_script("Привет hello"), Some(Script::Cyrillic));
         assert_eq!(dominant_script("Hello Привет мир"), Some(Script::Cyrillic));
