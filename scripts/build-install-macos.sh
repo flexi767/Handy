@@ -28,10 +28,16 @@ if [[ ! -f "$compiler_runtime" ]]; then
   exit 1
 fi
 
+# A local install does not need the updater archive, and Tauri would sign it
+# with the upstream release key, which this machine does not have: the build
+# then fails after the .app is already bundled.
 MACOSX_DEPLOYMENT_TARGET=26.0 \
   DEVELOPER_DIR="$developer_dir" \
   RUSTFLAGS="-C link-arg=$compiler_runtime" \
-  bun run tauri build --config src-tauri/tauri.local.conf.json --bundles app
+  bun run tauri build \
+  --config src-tauri/tauri.local.conf.json \
+  --config '{"bundle":{"createUpdaterArtifacts":false}}' \
+  --bundles app
 
 if [[ ! -d "$built_app" ]]; then
   echo "Built application not found: $built_app" >&2
