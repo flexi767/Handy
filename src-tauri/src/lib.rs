@@ -209,9 +209,6 @@ fn initialize_core_logic(app_handle: &AppHandle) {
     let history_manager =
         Arc::new(HistoryManager::new(app_handle).expect("Failed to initialize history manager"));
 
-    // Apply accelerator preferences before any model loads
-    managers::transcription::apply_accelerator_settings(app_handle);
-
     // Add managers to Tauri's managed state
     app_handle.manage(recording_manager.clone());
     app_handle.manage(model_manager.clone());
@@ -660,6 +657,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             shortcut::change_post_process_enabled_setting,
             shortcut::change_experimental_enabled_setting,
             shortcut::change_post_process_base_url_setting,
+            shortcut::change_post_process_api_format_setting,
             shortcut::change_post_process_api_key_setting,
             shortcut::change_post_process_model_setting,
             shortcut::set_post_process_provider,
@@ -675,6 +673,7 @@ fn specta_builder() -> Builder<tauri::Wry> {
             shortcut::change_append_trailing_space_setting,
             shortcut::change_lazy_stream_close_setting,
             shortcut::change_vad_enabled_setting,
+            shortcut::change_long_form_chunking_setting,
             shortcut::change_vad_backend_setting,
             shortcut::change_filler_word_removal_enabled_setting,
             shortcut::change_chinese_script_setting,
@@ -686,7 +685,6 @@ fn specta_builder() -> Builder<tauri::Wry> {
             shortcut::get_keyboard_implementation,
             shortcut::change_show_tray_icon_setting,
             shortcut::change_transcribe_accelerator_setting,
-            shortcut::change_ort_accelerator_setting,
             shortcut::change_transcribe_gpu_device,
             shortcut::get_available_accelerators,
             shortcut::handy_keys::start_handy_keys_recording,
@@ -713,6 +711,8 @@ fn specta_builder() -> Builder<tauri::Wry> {
             commands::models::get_model_info,
             commands::models::download_model,
             commands::models::delete_model,
+            commands::models::get_retired_models,
+            commands::models::delete_retired_model,
             commands::models::cancel_download,
             commands::models::set_active_model,
             commands::models::get_current_model,
@@ -952,7 +952,6 @@ pub fn run(cli_args: CliArgs) {
                 managers::transcription::report_compute_devices(&transcription_manager);
                 app_handle.manage(model_manager);
                 app_handle.manage(transcription_manager);
-                managers::transcription::apply_accelerator_settings(&app_handle);
 
                 let handle = app_handle.clone();
                 let args = cli_args.clone();
